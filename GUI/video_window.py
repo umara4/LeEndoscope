@@ -1,55 +1,52 @@
 import os
 import cv2
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFrame, QFileDialog,
-    QProgressBar, QMessageBox
+    QProgressBar, QMessageBox, QTimeEdit, QLineEdit,
+    QListWidget, QListWidgetItem, QMenu, QInputDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime
 from PyQt6.QtGui import QImage, QPixmap, QIcon
 
+class SegmentExtractor(QThread):
+    progress = pyqtSignal(tuple)  # (segment_name, progress_value)
+    finished_parsing = pyqtSignal(str)  # emits segment name when done
 
-class ExtractionWorker(QThread):
-    progress = pyqtSignal(int)
-    preview = pyqtSignal(object)
-    frame_index = pyqtSignal(int)
-    finished_parsing = pyqtSignal()
-
-    def __init__(self, video_path, output_folder, fps=2):
+    def __init__(self, video_path, output_folder, start_frame, end_frame, fps=2, name=""):
         super().__init__()
         self.video_path = video_path
         self.output_folder = output_folder
+        self.start_frame = start_frame
+        self.end_frame = end_frame
         self.fps = fps
+        self.name = name
 
     def run(self):
         os.makedirs(self.output_folder, exist_ok=True)
         cap = cv2.VideoCapture(self.video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        interval = int(video_fps // self.fps) if self.fps > 0 else 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
 
-        frame_count, saved_count = 0, 0
-        while True:
+        interval = int(cap.get(cv2.CAP_PROP_FPS) // self.fps) if self.fps > 0 else 1
+        frame_count, saved_count = self.start_frame, 0
+
+        while frame_count < self.end_frame:
             ret, frame = cap.read()
             if not ret:
                 break
-
-            self.preview.emit(frame)
-            self.frame_index.emit(frame_count)
 
             if frame_count % interval == 0:
                 filename = os.path.join(self.output_folder, f"frame_{saved_count:05d}.jpg")
                 cv2.imwrite(filename, frame)
                 saved_count += 1
 
-            progress_val = int((frame_count / total_frames) * 100)
-            self.progress.emit(progress_val)
+            progress_val = int(((frame_count - self.start_frame) / (self.end_frame - self.start_frame)) * 100)
+            self.progress.emit((self.name, progress_val))
 
             frame_count += 1
 
         cap.release()
-        self.finished_parsing.emit()
-
+        self.finished_parsing.emit(self.name)
 
 class VideoWindow(QMainWindow):
     def __init__(self):
@@ -85,11 +82,11 @@ class VideoWindow(QMainWindow):
         self.status_label = QLabel("Idle")
         side_layout.addWidget(self.status_label)
 
-        opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        opacity_slider.setMinimum(0)
-        opacity_slider.setMaximum(100)
-        side_layout.addWidget(QLabel("Opacity"))
-        side_layout.addWidget(opacity_slider)
+        side_layout.addWidget(QLabel("Segments"))
+        self.segment_list = QListWidget()
+        self.segment_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.segment_list.customContextMenuRequested.connect(self.show_segment_menu)
+        side_layout.addWidget(self.segment_list)
 
         # --- Central Viewer ---
         video_layout = QVBoxLayout()
@@ -97,7 +94,6 @@ class VideoWindow(QMainWindow):
         self.viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         video_layout.addWidget(self.viewer_label, 4)
 
-        # Timeline slider with time labels
         timebar_layout = QHBoxLayout()
         self.current_time_label = QLabel("00:00:00")
         self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
@@ -110,41 +106,107 @@ class VideoWindow(QMainWindow):
         timebar_layout.addWidget(self.total_time_label)
         video_layout.addLayout(timebar_layout)
 
-        # Playback controls
         controls_layout = QHBoxLayout()
         self.back_button = QPushButton("<<")
         self.play_pause_button = QPushButton()
-        self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))  # ▶️
-
+        self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
         self.forward_button = QPushButton(">>")
 
         self.play_pause_button.clicked.connect(self.toggle_play_pause)
-        self.back_button.clicked.connect(lambda: self.skip_frames(-self.fps))   # jump 1 sec back
-        self.forward_button.clicked.connect(lambda: self.skip_frames(self.fps)) # jump 1 sec forward
+        self.back_button.clicked.connect(lambda: self.skip_frames(-self.fps))
+        self.forward_button.clicked.connect(lambda: self.skip_frames(self.fps))
 
         controls_layout.addWidget(self.back_button)
         controls_layout.addWidget(self.play_pause_button)
         controls_layout.addWidget(self.forward_button)
         video_layout.addLayout(controls_layout)
 
+        # --- Segment Controls ---
+        segment_controls = QHBoxLayout()
+        self.segment_name_input = QLineEdit()
+        self.segment_name_input.setPlaceholderText("Segment name")
+        self.start_time_input = QTimeEdit()
+        self.start_time_input.setDisplayFormat("HH:mm:ss")
+        self.end_time_input = QTimeEdit()
+        self.end_time_input.setDisplayFormat("HH:mm:ss")
+        self.add_segment_btn = QPushButton("Add Segment")
+        self.add_segment_btn.clicked.connect(self.add_segment)
+
+        segment_controls.addWidget(self.segment_name_input)
+        segment_controls.addWidget(QLabel("Start"))
+        segment_controls.addWidget(self.start_time_input)
+        segment_controls.addWidget(QLabel("End"))
+        segment_controls.addWidget(self.end_time_input)
+        segment_controls.addWidget(self.add_segment_btn)
+        video_layout.addLayout(segment_controls)
+
         main_layout.addWidget(side_panel, 1)
         main_layout.addLayout(video_layout, 4)
-
         self.setCentralWidget(central_widget)
 
         # State
-        self.worker = None
         self.video_path = None
-        self.total_frames = 0
         self.cap = None
         self.fps = 30
+        self.total_frames = 0
         self.current_frame = 0
+        self.segments = []
+        self.worker_threads = []
+        self.segment_progress = {}
+        self.completed_segments = 0
 
-        # Timer for playback
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
 
-    # --- Video Loading ---
+    def pause_video(self):
+        if self.timer.isActive():
+            self.timer.stop()
+
+    def update_segment_progress(self, data):
+        name, value = data
+        self.segment_progress[name] = value
+        avg = sum(self.segment_progress.values()) / len(self.segment_progress)
+        self.progress.setValue(int(avg))
+
+    def on_finished_parsing(self, name):
+        self.completed_segments += 1
+        self.status_label.setText(f"Segment '{name}' done.")
+        if self.completed_segments == len(self.segments):
+            self.progress.setVisible(False)
+            self.status_label.setText("✅ All segments extracted!")
+            self.load_button.setEnabled(True)
+            self.cancel_button.setVisible(False)
+            QMessageBox.information(self, "Done", "All segments have been extracted.")
+
+    def start_extraction(self):
+        if not self.cap or not self.segments:
+            QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
+            return
+
+        self.pause_video()
+        self.status_label.setText("Extracting frames...")
+        self.load_button.setEnabled(False)
+        self.cancel_button.setVisible(True)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.segment_progress.clear()
+        self.completed_segments = 0
+        self.worker_threads = []
+
+        for seg in self.segments:
+            name = seg["name"]
+            start_sec = QTime(0, 0).secsTo(seg["start"])
+            end_sec = QTime(0, 0).secsTo(seg["end"])
+            start_frame = int(start_sec * self.fps)
+            end_frame = int(end_sec * self.fps)
+            folder_name = f"{name.replace(' ', '_')}_frame_output"
+
+            worker = SegmentExtractor(self.video_path, folder_name, start_frame, end_frame, fps=2, name=name)
+            worker.progress.connect(self.update_segment_progress)
+            worker.finished_parsing.connect(self.on_finished_parsing)
+            self.worker_threads.append(worker)
+            worker.start()
+
     def load_video_file(self):
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Select Video File", "", "Video Files (*.mp4 *.avi *.mov *.mkv)"
@@ -159,118 +221,105 @@ class VideoWindow(QMainWindow):
             self.timeline_slider.setMaximum(self.total_frames - 1)
             self.timeline_slider.setEnabled(True)
 
+            self.segment_list.clear()
+            self.segments = []
+
             duration_seconds = self.total_frames // self.fps
             self.total_time_label.setText(self.seconds_to_time(duration_seconds))
-
             self.status_label.setText("Video loaded. Ready.")
             self.extract_button.setEnabled(True)
 
-            # ✅ Show the very first frame immediately
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
             if ret:
                 self.update_preview(frame)
                 self.current_time_label.setText("00:00:00")
-    # --- Scrubbing ---
-    def scrub_video(self):
-        if not self.cap:
+
+    def add_segment(self):
+        name = self.segment_name_input.text().strip() or f"Segment {len(self.segments)+1}"
+        start = self.start_time_input.time()
+        end = self.end_time_input.time()
+        if start >= end:
+            QMessageBox.warning(self, "Invalid Segment", "Start time must be before end time.")
             return
-        frame_index = self.timeline_slider.value()
-        self.current_frame = frame_index
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ret, frame = self.cap.read()
-        if ret:
-            self.update_preview(frame)
-            self.current_time_label.setText(self.seconds_to_time(frame_index // self.fps))
+        self.segments.append({"name": name, "start": start, "end": end})
+        item = QListWidgetItem(f"{name}: {start.toString('HH:mm:ss')} → {end.toString('HH:mm:ss')}")
+        self.segment_list.addItem(item)
+        self.segment_name_input.clear()
 
-
-    # --- Playback Controls ---
-    def play_video(self):
-        if self.cap:
-            # don’t reset frame each tick, just let cap.read() advance
-            self.timer.start(int(1000 / self.fps))
-
-    def pause_video(self):
-        self.timer.stop()
-    
-    def toggle_play_pause(self):
-        if self.timer.isActive():
-            self.pause_video()
-            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))  # ▶️
-        else:
-            self.play_video()
-            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))  # ⏸️
-
-    def next_frame(self):
-        if not self.cap:
+    def show_segment_menu(self, pos):
+        item = self.segment_list.itemAt(pos)
+        if not item:
             return
-        ret, frame = self.cap.read()
-        if not ret:
-            self.pause_video()
-            return
-
-        self.current_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-        self.update_preview(frame)
-        self.timeline_slider.setValue(self.current_frame)
-        self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
-
-    def skip_frames(self, n):
-        if not self.cap:
-            return
-        self.current_frame = max(0, min(self.total_frames - 1, self.current_frame + n))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
-        ret, frame = self.cap.read()
-        if ret:
-            self.update_preview(frame)
-            self.timeline_slider.setValue(self.current_frame)
-            self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
-
-    # --- Extraction ---
-    def start_extraction(self):
-        if not self.video_path:
-            return
-
-        output_folder = "frames_output"
-        self.status_label.setText("Extracting frames...")
-
-        self.load_button.setEnabled(False)
-        self.cancel_button.setVisible(True)
-        self.progress.setVisible(True)
-        self.progress.setValue(0)
-
-        self.worker = ExtractionWorker(self.video_path, output_folder, fps=2)
-        self.worker.progress.connect(self.progress.setValue)
-        self.worker.preview.connect(self.update_preview)
-        self.worker.finished_parsing.connect(self.on_finished_parsing)
-        self.worker.start()
+        menu = QMenu()
+        rename_action = menu.addAction("Rename")
+        delete_action = menu.addAction("Delete")
+        action = menu.exec(self.segment_list.mapToGlobal(pos))
+        index = self.segment_list.row(item)
+        if action == rename_action:
+            new_name, ok = QInputDialog.getText(self, "Rename Segment", "New name:")
+            if ok and new_name:
+                self.segments[index]["name"] = new_name
+                item.setText(f"{new_name}: {self.segments[index]['start'].toString('HH:mm:ss')} → {self.segments[index]['end'].toString('HH:mm:ss')}")
+        elif action == delete_action:
+            self.segments.pop(index)
+            self.segment_list.takeItem(index)
 
     def cancel_extraction(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.terminate()
-            self.worker.wait()
-            self.status_label.setText("Extraction cancelled.")
-            self.progress.setVisible(False)
-            self.load_button.setEnabled(True)
-            self.cancel_button.setVisible(False)
-
-    def on_finished_parsing(self):
+        for worker in self.worker_threads:
+            if worker.isRunning():
+                worker.terminate()
+                worker.wait()
+        self.status_label.setText("Extraction cancelled.")
         self.progress.setVisible(False)
-        self.status_label.setText("Done!")
         self.load_button.setEnabled(True)
         self.cancel_button.setVisible(False)
-        QMessageBox.information(self, "Done", "Frame extraction complete!")
 
-    # --- Helpers ---
     def update_preview(self, frame):
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
-        self.viewer_label.setPixmap(QPixmap.fromImage(qimg).scaled(
-            self.viewer_label.size(), Qt.AspectRatioMode.KeepAspectRatio
-        ))
+        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qt_image).scaled(self.viewer_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.viewer_label.setPixmap(pixmap)
+
+    def next_frame(self):
+        if self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame += 1
+                self.timeline_slider.setValue(self.current_frame)
+                self.update_preview(frame)
+                self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
+            else:
+                self.timer.stop()
+
+    def toggle_play_pause(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        else:
+            self.timer.start(int(1000 / self.fps))
+            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
+
+    def skip_frames(self, count):
+        new_frame = max(0, min(self.total_frames - 1, self.current_frame + count))
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, new_frame)
+        ret, frame = self.cap.read()
+        if ret:
+            self.current_frame = new_frame
+            self.timeline_slider.setValue(self.current_frame)
+            self.update_preview(frame)
+            self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
+
+    def scrub_video(self):
+        frame = self.timeline_slider.value()
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+        ret, frame_data = self.cap.read()
+        if ret:
+            self.current_frame = frame
+            self.update_preview(frame_data)
+            self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
 
     def seconds_to_time(self, seconds):
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        s = seconds % 60
-        return f"{h:02}:{m:02}:{s:02}"
+        return QTime(0, 0).addSecs(seconds).toString("HH:mm:ss")
