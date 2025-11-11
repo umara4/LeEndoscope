@@ -88,6 +88,11 @@ class VideoWindow(QMainWindow):
         self.segment_list.customContextMenuRequested.connect(self.show_segment_menu)
         side_layout.addWidget(self.segment_list)
 
+        self.view_frames_button = QPushButton("View Extracted Frames")
+        self.view_frames_button.setEnabled(False)
+        self.view_frames_button.clicked.connect(self.open_frame_browser)
+        side_layout.addWidget(self.view_frames_button)
+
         # --- Central Viewer ---
         video_layout = QVBoxLayout()
         self.viewer_label = QLabel("Video Preview")
@@ -176,8 +181,21 @@ class VideoWindow(QMainWindow):
             self.status_label.setText("✅ All segments extracted!")
             self.load_button.setEnabled(True)
             self.cancel_button.setVisible(False)
+            self.view_frames_button.setEnabled(True)
             QMessageBox.information(self, "Done", "All segments have been extracted.")
 
+    def open_frame_browser(self):
+        from frame_browser import FrameBrowser
+        # ✅ pass both segment name and folder path
+        segments = [(seg["name"], f"{seg['name'].replace(' ', '_')}_frame_output") for seg in self.segments]
+        browser = FrameBrowser(segments, self)
+        browser.exec()
+
+        # After closing, you can access selections:
+        chosen = browser.selected_frames
+        print("User selected frames:", chosen)
+        # chosen is a dict: {folder_path: {img_name: {"checked": bool, "modified": bool}}}
+       
     def start_extraction(self):
         if not self.cap or not self.segments:
             QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
