@@ -102,6 +102,10 @@ class VideoWindow(QMainWindow):
         self.view_frames_button.clicked.connect(self.open_frame_browser)
         side_layout.addWidget(self.view_frames_button)
 
+        self.reconstruct_button = QPushButton("Start 3D Reconstruction")
+        self.reconstruct_button.clicked.connect(self.start_reconstruction)
+        side_layout.addWidget(self.reconstruct_button)
+
         # --- Central Viewer ---
         video_layout = QVBoxLayout()
         self.viewer_label = QLabel("Video Preview")
@@ -235,9 +239,10 @@ class VideoWindow(QMainWindow):
 
         # After closing, you can access selections:
         chosen = browser.selected_frames
-        print("User selected frames:", chosen)
+        #print("User selected frames:", chosen)
         # chosen is a dict: {folder_path: {img_name: {"checked": bool, "modified": bool}}}
-       
+        self.selected_frames = chosen
+
     def start_extraction(self):
         if not self.cap or not self.segments:
             QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
@@ -334,6 +339,23 @@ class VideoWindow(QMainWindow):
         self.progress.setVisible(False)
         self.load_button.setEnabled(True)
         self.cancel_button.setVisible(False)
+
+    def start_reconstruction(self):
+        # Placeholder for your 3D reconstruction pipeline
+        # You can pass in selected frames or segment outputs here
+        QMessageBox.information(self, "3D Reconstruction", "Starting 3D reconstruction process...")
+
+        # Example: if you want to use selected frames
+        if hasattr(self, "selected_frames"):
+            # Filter checked frames
+            checked_frames = []
+            for folder, frames in self.selected_frames.items():
+                for img, data in frames.items():
+                    if data["checked"]:
+                        checked_frames.append(os.path.join(folder, img))
+
+            print("Frames to reconstruct:", checked_frames)
+            # TODO: call your reconstruction algorithm here
 
     def update_preview(self, frame):
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
