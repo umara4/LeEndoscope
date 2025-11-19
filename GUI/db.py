@@ -9,6 +9,11 @@ from pathlib import Path
 import hashlib
 import secrets
 from typing import Optional
+import os
+
+# Admin password: can be overridden by setting LEENDOSCOPE_ADMIN_PASS env var.
+# Default per user request is 'admin'.
+ADMIN_PASSWORD = os.environ.get("LEENDOSCOPE_ADMIN_PASS", "admin")
 
 DEFAULT_DB = Path(__file__).with_suffix(".db")
 
@@ -53,6 +58,49 @@ class UserDatabase:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    # --- Admin-protected operations ------------------------------------------------
+    def _check_admin(self, password: str) -> bool:
+        """Check admin password. Returns True when correct."""
+        if password is None:
+            return False
+        return password == ADMIN_PASSWORD
+
+    def reset_database(self, admin_password: str) -> bool:
+        """Drop and recreate the users table. Requires admin password."""
+        if not self._check_admin(admin_password):
+            raise PermissionError("Invalid admin password")
+        with self._conn:
+            self._conn.execute("DROP TABLE IF EXISTS users")
+            self._conn.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    salt TEXT NOT NULL,
+                    pwd_hash TEXT NOT NULL,
+                    email TEXT
+                )
+                """
+            )
+        self._conn.commit()
+        return True
+
+    def delete_user(self, username: str, admin_password: str) -> bool:
+        """Delete a user by username. Requires admin password."""
+        if not self._check_admin(admin_password):
+            raise PermissionError("Invalid admin password")
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM users WHERE username = ?", (username.strip(),))
+        return cur.rowcount > 0
+
+    def change_user_email(self, username: str, new_email: str, admin_password: str) -> bool:
+        """Change a user's email. Requires admin password."""
+        if not self._check_admin(admin_password):
+            raise PermissionError("Invalid admin password")
+        with self._conn:
+            cur = self._conn.execute("UPDATE users SET email = ? WHERE username = ?", (new_email.strip(), username.strip()))
+        return cur.rowcount > 0
 
     def verify_user(self, username: str, password: str) -> bool:
         cur = self._conn.cursor()

@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer, QPropertyAnimation, QEa
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtCore import QSize as QtSize
 
-from GUI.db import UserDatabase
+from db import UserDatabase
 from geometry_store import save_geometry, load_geometry, save_start_size, get_start_size
 from video_window import VideoWindow  # import at top
 
