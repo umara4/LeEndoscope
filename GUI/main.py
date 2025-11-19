@@ -1,15 +1,14 @@
-# main.py
+"""
+Application entrypoint.
+"""
 import sys
 from PyQt6.QtWidgets import QApplication
-from login import MainLoginWindow
+from ui_windows import MainLoginWindow
 
 def main():
     app = QApplication(sys.argv)
-
-    # Start with the splash screen
-    splash = MainLoginWindow()
-    splash.show()
-
+    main_login = MainLoginWindow()
+    main_login.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":

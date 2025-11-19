@@ -6,8 +6,9 @@ from PyQt6.QtWidgets import (
     QProgressBar, QMessageBox, QTimeEdit, QLineEdit,
     QListWidget, QListWidgetItem, QMenu, QInputDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QIcon
+from geometry_store import load_geometry, save_geometry, get_start_size
 
 class SegmentExtractor(QThread):
     progress = pyqtSignal(tuple)  # (segment_name, progress_value)
@@ -53,6 +54,14 @@ class VideoWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Surgical Imaging Interface")
         self.resize(1000, 600)
+
+        # restore persisted geometry if available (best-effort)
+        g = load_geometry()
+        if g:
+            try:
+                self.setGeometry(*g)
+            except Exception:
+                pass
 
         central_widget = QWidget()
         main_layout = QHBoxLayout(central_widget)
@@ -166,6 +175,39 @@ class VideoWindow(QMainWindow):
     def pause_video(self):
         if self.timer.isActive():
             self.timer.stop()
+
+    def closeEvent(self, event):
+        try:
+            geo = self.geometry()
+            save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        try:
+            geo = self.geometry()
+            save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+        except Exception:
+            pass
+        super().resizeEvent(event)
+
+    def moveEvent(self, event):
+        try:
+            geo = self.geometry()
+            save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+        except Exception:
+            pass
+        super().moveEvent(event)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            try:
+                geo = self.geometry()
+                save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+            except Exception:
+                pass
+        super().changeEvent(event)
 
     def update_segment_progress(self, data):
         name, value = data
