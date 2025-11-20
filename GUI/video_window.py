@@ -1,5 +1,6 @@
 import os
 import cv2
+import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFrame, QFileDialog,
@@ -22,6 +23,42 @@ class SegmentExtractor(QThread):
         self.end_frame = end_frame
         self.fps = fps
         self.name = name
+
+    def calculate_SNR(self,frame):
+        gray_scale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean = np.mean(gray_scale)
+        std = np.std(gray_scale)
+        if std ==0:
+            return 0
+        snr = 10 * np.log10((mean**2) / (std**2))
+        return snr
+    
+    def calculate_sharpness(self,frame):
+        gray_scale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        lapacian_variance = cv2.Laplacian(gray_scale, cv2.CV_64F).var()
+        return lapacian_variance
+    
+    def eval_frames(self):
+        selected_frames = []
+        rejected_frames = []
+
+        for filename in os.listdir(self.output_folder):
+
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.svg', '.webp', '.raw')):
+
+                frame_path = os.path.join(self.output_folder, filename)
+                frame = cv2.imread(frame_path)
+
+                snr = self.calculate_SNR(frame)
+                sharpness = self.calculate_sharpness(frame)
+
+                if snr >= 25 and sharpness >= 100:
+                    selected_frames.append((filename, snr, sharpness))
+
+                else:
+                    rejected_frames.append((filename, snr, sharpness))
+
+        return selected_frames, rejected_frames
 
     def run(self):
         os.makedirs(self.output_folder, exist_ok=True)
@@ -47,6 +84,7 @@ class SegmentExtractor(QThread):
             frame_count += 1
 
         cap.release()
+        selected, rejected = self.eval_frames()
         self.finished_parsing.emit(self.name)
 
 class VideoWindow(QMainWindow):
@@ -172,6 +210,7 @@ class VideoWindow(QMainWindow):
         self.worker_threads = []
         self.segment_progress = {}
         self.completed_segments = 0
+        self.selected_frames = {}
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
@@ -229,11 +268,22 @@ class VideoWindow(QMainWindow):
             self.cancel_button.setVisible(False)
             self.view_frames_button.setEnabled(True)
             QMessageBox.information(self, "Done", "All segments have been extracted.")
-
+    
     def open_frame_browser(self):
         from frame_browser import FrameBrowser
         # ✅ pass both segment name and folder path
         segments = [(seg["name"], f"{seg['name'].replace(' ', '_')}_frame_output") for seg in self.segments]
+        
+        # Use the local SegmentExtractor class defined in this module (no external import)
+        for seg in self.segments:
+            folder_path = f"{seg['name'].replace(' ', '_')}_frame_output"
+            extractor = SegmentExtractor(self.video_path, folder_path, 0, 0, 1, seg["name"])  # start_frame and end_frame are irrelevant here
+            selected, rejected = extractor.eval_frames()
+            if folder_path not in self.selected_frames:
+                self.selected_frames[folder_path] = {}
+            for filename, snr, sharpness in rejected:
+                self.selected_frames[folder_path][filename] = {"checked": False, "modified": False}
+       
         browser = FrameBrowser(segments, self)
         browser.exec()
 
