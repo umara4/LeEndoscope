@@ -85,6 +85,7 @@ class ReconstructionWindow(QMainWindow):
 
         self.mesh = None
         self._manip = None
+        self._zoom_controls = None
         self.cam_center = (0.0, 0.0, 0.0)
         self.cam_dist = 1.0
         self.cam_az = 45.0
@@ -100,6 +101,7 @@ class ReconstructionWindow(QMainWindow):
             self.fit_btn.setEnabled(False)
         else:
             self._create_manipulator()
+            self._create_zoom_controls()
 
     def _read_pcd(self, filename):
         with open(filename, "rb") as fh:
@@ -359,16 +361,63 @@ class ReconstructionWindow(QMainWindow):
             else:
                 # Point cloud case
                 if "RGB" in mesh.point_data:
-                    self.plotter.add_points(mesh, scalars="RGB", rgb=True, point_size=5)
+                    self.plotter.add_points(mesh, scalars="RGB", rgb=True, point_size=1)
                 else:
-                    self.plotter.add_points(mesh.points, point_size=3)
+                    self.plotter.add_points(mesh.points, point_size=1)
 
             self.plotter.reset_camera()
             self.plotter.render()
         except Exception as ex:
             QMessageBox.warning(self, "Render Error", f"Failed to render mesh:\n{ex}")
 
+    def _zoom(self, factor):
+        """Zoom in or out by adjusting camera distance."""
+        if factor > 0:
+            # Zoom in (decrease distance)
+            self.cam_dist = max(0.01, self.cam_dist * 0.8)
+        else:
+            # Zoom out (increase distance)
+            self.cam_dist = self.cam_dist * 1.25
+        self._apply_camera()
 
+    def _create_zoom_controls(self):
+        """Create zoom controls positioned above the manipulator."""
+        if self.plotter is None:
+            return
+        interactor = self.plotter.interactor
+
+        # Zoom controls frame
+        self._zoom_controls = QFrame(interactor)
+        self._zoom_controls.setObjectName("zoom_controls")
+        self._zoom_controls.setStyleSheet("""
+            #zoom_controls {
+                background: transparent;
+            }
+        """)
+        self._zoom_controls.setFixedSize(QSize(80, 40))
+        
+        zoom_layout = QHBoxLayout(self._zoom_controls)
+        zoom_layout.setContentsMargins(4, 4, 4, 4)
+        zoom_layout.setSpacing(4)
+
+        # Zoom in button (+)
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_in.setFixedSize(36, 32)
+        btn_zoom_in.setStyleSheet("background: rgba(128,128,128,0.8); border-radius: 16px; font-weight: bold; font-size: 18px; color: white;")
+        btn_zoom_in.clicked.connect(lambda: self._zoom(1))
+
+        # Zoom out button (-)
+        btn_zoom_out = QPushButton("-")
+        btn_zoom_out.setFixedSize(36, 32)
+        btn_zoom_out.setStyleSheet("background: rgba(128,128,128,0.8); border-radius: 16px; font-weight: bold; font-size: 18px; color: white;")
+        btn_zoom_out.clicked.connect(lambda: self._zoom(-1))
+
+        zoom_layout.addWidget(btn_zoom_in)
+        zoom_layout.addWidget(btn_zoom_out)
+
+        self._zoom_controls.raise_()
+        interactor.installEventFilter(self)
+        self._position_zoom_controls()
 
     def _create_manipulator(self):
         if self.plotter is None:
@@ -380,7 +429,7 @@ class ReconstructionWindow(QMainWindow):
         self._manip.setObjectName("manipulator")
         self._manip.setStyleSheet("""
             #manipulator {
-                background: rgba(255,255,255,0.0);  /* fully transparent */
+                background: transparent;
             }
         """)
         self._manip.setFixedSize(QSize(140, 140))
@@ -398,12 +447,12 @@ class ReconstructionWindow(QMainWindow):
         btn_right.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
 
         # Axis control button in the centre
-        btn_center = QPushButton("XYZ")  # placeholder text
+        btn_center = QPushButton("Home")  # placeholder text
         # Later you can replace with a small axis widget or icon
 
         for b in (btn_up, btn_down, btn_left, btn_right, btn_center):
             b.setFixedSize(36, 36)
-            b.setStyleSheet("background: rgba(255,255,255,0.6); border-radius: 18px;")
+            b.setStyleSheet("background: rgba(128,128,128,0.8); border-radius:6px; color: white;")
 
         grid.addWidget(btn_up, 0, 1)
         grid.addWidget(btn_left, 1, 0)
@@ -425,6 +474,7 @@ class ReconstructionWindow(QMainWindow):
     def eventFilter(self, watched, event):
         if self.plotter is not None and watched is self.plotter.interactor and event.type() == QEvent.Type.Resize:
             self._position_manip()
+            self._position_zoom_controls()
         return super().eventFilter(watched, event)
 
     def _position_manip(self):
@@ -438,6 +488,21 @@ class ReconstructionWindow(QMainWindow):
         x = max(0, pw - mw - margin)
         y = max(0, ph - mh - margin)
         self._manip.move(x, y)
+
+    def _position_zoom_controls(self):
+        """Position zoom controls above the manipulator."""
+        if self.plotter is None or self._zoom_controls is None:
+            return
+        pw = self.plotter.interactor.width()
+        ph = self.plotter.interactor.height()
+        zw = self._zoom_controls.width()
+        zh = self._zoom_controls.height()
+        margin = 12
+        # Position above the manipulator (manipulator is 140px wide, zoom is 80px)
+        manip_x = max(0, pw - 140 - margin)
+        x = manip_x + (140 - zw) // 2  # Center horizontally with manipulator
+        y = max(0, ph - 140 - zh - margin - 8)  # Above manipulator with small gap
+        self._zoom_controls.move(x, y)
 
     def _orbit(self, delta_az=0.0, delta_el=0.0):
         self.cam_az = (self.cam_az + delta_az) % 360.0
