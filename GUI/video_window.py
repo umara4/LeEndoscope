@@ -391,24 +391,16 @@ class VideoWindow(QMainWindow):
         self.cancel_button.setVisible(False)
 
     def start_reconstruction(self):
-        # Open the reconstruction window (separate UI).
+        # Open the reconstruction window (separate UI) without checking selected frames.
         try:
             from reconstruction_window import ReconstructionWindow
         except Exception as e:
             QMessageBox.warning(self, "Cannot Open Reconstruction", f"Failed to import reconstruction UI: {e}")
             return
 
-        # Pass any necessary data (e.g. selected frames) to the reconstruction window if needed
-        checked_frames = []
-        if hasattr(self, "selected_frames"):
-            for folder, frames in self.selected_frames.items():
-                for img, data in frames.items():
-                    if data.get("checked"):
-                        checked_frames.append(os.path.join(folder, img))
-
-        self.recon_window = ReconstructionWindow(parent=self, frames_for_reconstruction=checked_frames)
+        # Directly show the reconstruction UI and hide this window.
+        self.recon_window = ReconstructionWindow(parent=self)
         self.recon_window.show()
-        # hide the video window to "transfer" to reconstruction workflow
         self.hide()
 
     def update_preview(self, frame):
