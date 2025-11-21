@@ -1,0 +1,470 @@
+{
+  "Segment1_frame_output": {
+    "frame_00000.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00001.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00002.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00003.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00004.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00005.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00006.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00007.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00008.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00009.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00010.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00011.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00012.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00013.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00014.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00015.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00016.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00017.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00018.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00019.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00020.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00021.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00022.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00023.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00024.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00025.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00026.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00027.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00028.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00029.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00030.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00031.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00032.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00033.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00034.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00035.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00036.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00037.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00038.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00039.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00040.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00041.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00042.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00043.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00044.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00045.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00046.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00047.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00048.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00049.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00050.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00051.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00052.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00053.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00054.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00055.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00056.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00057.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00058.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00059.jpg": {
+      "checked": true,
+      "modified": false
+    }
+  },
+  "Segment2_frame_output": {
+    "frame_00000.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00001.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00002.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00003.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00004.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00005.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00006.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00007.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00008.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00009.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00010.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00011.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00012.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00013.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00014.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00015.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00016.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00017.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00018.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00019.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00020.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00021.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00022.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00023.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00024.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00025.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00026.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00027.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00028.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00029.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00030.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00031.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00032.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00033.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00034.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00035.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00036.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00037.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00038.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00039.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00040.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00041.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00042.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00043.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00044.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00045.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00046.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00047.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00048.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00049.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00050.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00051.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00052.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00053.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00054.jpg": {
+      "checked": true,
+      "modified": false
+    },
+    "frame_00055.jpg": {
+      "checked": true,
+      "modified": false
+    }
+  }
+}
