@@ -8,14 +8,16 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFileDialog, QFrame, QMessageBox, QGridLayout
+    QPushButton, QLabel, QFileDialog, QFrame, QMessageBox, QGridLayout, QStyle
 )
 from PyQt6.QtCore import Qt, QEvent, QSize
 
 try:
-    import lz4.frame as _lz4frame
+    import importlib
+    _lz4frame = importlib.import_module("lz4.frame")
     LZ4_AVAILABLE = True
 except Exception:
+    _lz4frame = None
     LZ4_AVAILABLE = False
 
 try:
@@ -342,50 +344,66 @@ class ReconstructionWindow(QMainWindow):
         if self.plotter is None:
             return
         try:
-            try:
-                self.plotter.clear()
-            except Exception:
-                pass
-            try:
-                self.plotter.remove_actor("*")
-            except Exception:
-                pass
+            self.plotter.clear()
+            self.plotter.remove_actor("*")
+        except Exception:
+            pass
 
-            n_faces = getattr(mesh, "n_faces", 0)
-            if n_faces and n_faces > 0:
-                self.plotter.add_mesh(mesh, show_edges=False, smooth_shading=True)
+        try:
+            # If mesh has faces, render as mesh
+            if getattr(mesh, "n_faces", 0) > 0:
+                if "RGB" in mesh.point_data:
+                    self.plotter.add_mesh(mesh, scalars="RGB", rgb=True)
+                else:
+                    self.plotter.add_mesh(mesh, show_edges=False, smooth_shading=True)
             else:
-                pts = mesh.points if hasattr(mesh, "points") else np.asarray(mesh)
-                self.plotter.add_points(pts, point_size=5, render_points_as_spheres=False)
+                # Point cloud case
+                if "RGB" in mesh.point_data:
+                    self.plotter.add_points(mesh, scalars="RGB", rgb=True, point_size=5)
+                else:
+                    self.plotter.add_points(mesh.points, point_size=3)
 
-            try:
-                self.plotter.reset_camera()
-            except Exception:
-                pass
+            self.plotter.reset_camera()
             self.plotter.render()
         except Exception as ex:
             QMessageBox.warning(self, "Render Error", f"Failed to render mesh:\n{ex}")
+
+
 
     def _create_manipulator(self):
         if self.plotter is None:
             return
         interactor = self.plotter.interactor
+
+        # Transparent overlay frame
         self._manip = QFrame(interactor)
         self._manip.setObjectName("manipulator")
-        self._manip.setStyleSheet("#manipulator { background: rgba(0,0,0,0.18); border-radius: ); }")
+        self._manip.setStyleSheet("""
+            #manipulator {
+                background: rgba(255,255,255,0.0);  /* fully transparent */
+            }
+        """)
         self._manip.setFixedSize(QSize(140, 140))
         grid = QGridLayout(self._manip)
         grid.setContentsMargins(8, 8, 8, 8)
 
-        btn_up = QPushButton("↑")
-        btn_down = QPushButton("↓")
-        btn_left = QPushButton("←")
-        btn_right = QPushButton("→")
-        btn_center = QPushButton("∘")
+        # Arrow buttons using system icons
+        btn_up = QPushButton()
+        btn_up.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        btn_down = QPushButton()
+        btn_down.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        btn_left = QPushButton()
+        btn_left.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
+        btn_right = QPushButton()
+        btn_right.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+
+        # Axis control button in the centre
+        btn_center = QPushButton("XYZ")  # placeholder text
+        # Later you can replace with a small axis widget or icon
 
         for b in (btn_up, btn_down, btn_left, btn_right, btn_center):
             b.setFixedSize(36, 36)
-            b.setStyleSheet("background: rgba(255,255,255,0.9); border-radius:6px;")
+            b.setStyleSheet("background: rgba(255,255,255,0.6); border-radius: 18px;")
 
         grid.addWidget(btn_up, 0, 1)
         grid.addWidget(btn_left, 1, 0)
@@ -393,6 +411,7 @@ class ReconstructionWindow(QMainWindow):
         grid.addWidget(btn_right, 1, 2)
         grid.addWidget(btn_down, 2, 1)
 
+        # Connect buttons to orbit/fit
         btn_left.clicked.connect(lambda: self._orbit(delta_az=-15))
         btn_right.clicked.connect(lambda: self._orbit(delta_az=15))
         btn_up.clicked.connect(lambda: self._orbit(delta_el=10))
