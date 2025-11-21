@@ -391,21 +391,25 @@ class VideoWindow(QMainWindow):
         self.cancel_button.setVisible(False)
 
     def start_reconstruction(self):
-        # Placeholder for your 3D reconstruction pipeline
-        # You can pass in selected frames or segment outputs here
-        QMessageBox.information(self, "3D Reconstruction", "Starting 3D reconstruction process...")
+        # Open the reconstruction window (separate UI).
+        try:
+            from reconstruction_window import ReconstructionWindow
+        except Exception as e:
+            QMessageBox.warning(self, "Cannot Open Reconstruction", f"Failed to import reconstruction UI: {e}")
+            return
 
-        # Example: if you want to use selected frames
+        # Pass any necessary data (e.g. selected frames) to the reconstruction window if needed
+        checked_frames = []
         if hasattr(self, "selected_frames"):
-            # Filter checked frames
-            checked_frames = []
             for folder, frames in self.selected_frames.items():
                 for img, data in frames.items():
-                    if data["checked"]:
+                    if data.get("checked"):
                         checked_frames.append(os.path.join(folder, img))
 
-            print("Frames to reconstruct:", checked_frames)
-            # TODO: call your reconstruction algorithm here
+        self.recon_window = ReconstructionWindow(parent=self, frames_for_reconstruction=checked_frames)
+        self.recon_window.show()
+        # hide the video window to "transfer" to reconstruction workflow
+        self.hide()
 
     def update_preview(self, frame):
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
