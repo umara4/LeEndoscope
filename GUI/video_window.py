@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFrame, QFileDialog,
     QProgressBar, QMessageBox, QTimeEdit, QLineEdit,
-    QListWidget, QListWidgetItem, QMenu, QInputDialog
+    QListWidget, QListWidgetItem, QMenu, QInputDialog, QTextEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QIcon
@@ -92,6 +92,81 @@ class VideoWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Surgical Imaging Interface")
         self.resize(1000, 600)
+        
+        # Set dark theme
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #404040;
+            }
+            QWidget {
+                background-color: #404040;
+                color: #ffffff;
+            }
+            QFrame {
+                background-color: #606060;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background-color: #c0c0c0;
+                border: 1px solid #a0a0a0;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+                color: #000000;
+            }
+            QPushButton[objectName="play_pause_button"],
+            QPushButton[objectName="back_button"],
+            QPushButton[objectName="forward_button"] {
+                font-size: 20px;
+                font-weight: 900;
+                padding: 12px;
+            }
+            QPushButton:hover {
+                background-color: #d0d0d0;
+            }
+            QPushButton:pressed {
+                background-color: #b0b0b0;
+            }
+            QLabel {
+                color: #ffffff;
+                background-color: transparent;
+                border: none;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px;
+                background: #606060;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #c0c0c0;
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            QListWidget {
+                background-color: #505050;
+                border: 1px solid #606060;
+                border-radius: 4px;
+                color: #ffffff;
+            }
+            QListWidget::item {
+                padding: 4px;
+                border-bottom: 1px solid #606060;
+            }
+            QListWidget::item:selected {
+                background-color: #708090;
+            }
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #a0a0a0;
+                border-radius: 4px;
+                padding: 4px;
+                color: #000000;
+            }
+        """)
 
         # restore persisted geometry if available (best-effort)
         g = load_geometry()
@@ -106,34 +181,38 @@ class VideoWindow(QMainWindow):
 
         # --- Side Panel ---
         side_panel = QFrame()
+        side_panel.setStyleSheet("""
+            QFrame {
+                background-color: #606060;
+                border: 0.5px solid #000000;
+                border-radius: 8px;
+            }
+        """)
         side_layout = QVBoxLayout(side_panel)
 
         self.load_button = QPushButton("Load Video")
         self.load_button.clicked.connect(self.load_video_file)
         side_layout.addWidget(self.load_button)
 
-        self.extract_button = QPushButton("Extract Frames")
-        self.extract_button.setEnabled(False)
-        self.extract_button.clicked.connect(self.start_extraction)
-        side_layout.addWidget(self.extract_button)
-
-        self.cancel_button = QPushButton("Cancel Extraction")
-        self.cancel_button.setVisible(False)
-        self.cancel_button.clicked.connect(self.cancel_extraction)
-        side_layout.addWidget(self.cancel_button)
-
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        side_layout.addWidget(self.progress)
-
-        self.status_label = QLabel("Idle")
-        side_layout.addWidget(self.status_label)
-
-        side_layout.addWidget(QLabel("Segments"))
+        # Collapsible Segments section
+        self.segments_collapsed = True
+        self.segments_button = QPushButton("Segments")
+        self.segments_button.setFixedHeight(40)  # Same height as other buttons
+        self.segments_button.clicked.connect(self.toggle_segments)
+        side_layout.addWidget(self.segments_button)
+        
         self.segment_list = QListWidget()
         self.segment_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.segment_list.customContextMenuRequested.connect(self.show_segment_menu)
+        self.segment_list.setVisible(False)  # Start collapsed
+        self.segment_list.setMaximumHeight(150)  # Limit expansion height
         side_layout.addWidget(self.segment_list)
+
+        self.extract_button = QPushButton("Extract Frames")
+        self.extract_button.setEnabled(False)
+        self.extract_button.clicked.connect(self.start_extraction)
+        self.update_extract_button_state(False)
+        side_layout.addWidget(self.extract_button)
 
         self.view_frames_button = QPushButton("View Extracted Frames")
         self.view_frames_button.setEnabled(False)
@@ -144,10 +223,60 @@ class VideoWindow(QMainWindow):
         self.reconstruct_button.clicked.connect(self.start_reconstruction)
         side_layout.addWidget(self.reconstruct_button)
 
+        self.cancel_button = QPushButton("Cancel Extraction")
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_extraction)
+        side_layout.addWidget(self.cancel_button)
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        side_layout.addWidget(self.progress)
+
+        # Add spacer to push terminal to bottom
+        side_layout.addStretch(1)
+        
+        # Terminal section at bottom - fixed position
+        terminal_label = QLabel("Terminal")
+        terminal_label.setStyleSheet("""
+            QLabel {
+                background-color: #c0c0c0;
+                color: #000000;
+                font-weight: bold;
+                padding: 8px;
+                border: 1px solid #a0a0a0;
+                border-radius: 4px;
+            }
+        """)
+        side_layout.addWidget(terminal_label)
+        
+        self.terminal_display = QTextEdit()
+        self.terminal_display.setReadOnly(True)
+        self.terminal_display.setFixedHeight(120)
+        self.terminal_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #606060;
+                border-radius: 4px;
+                font-family: Consolas, monospace;
+                font-size: 10px;
+            }
+        """)
+        side_layout.addWidget(self.terminal_display)
+
         # --- Central Viewer ---
         video_layout = QVBoxLayout()
         self.viewer_label = QLabel("Video Preview")
         self.viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.viewer_label.setStyleSheet("""
+            QLabel {
+                background-color: #404040;
+                border: 0.5px solid #000000;
+                border-radius: 4px;
+                color: #c0c0c0;
+                font-size: 14px;
+            }
+        """)
         video_layout.addWidget(self.viewer_label, 4)
 
         timebar_layout = QHBoxLayout()
@@ -260,14 +389,18 @@ class VideoWindow(QMainWindow):
 
     def on_finished_parsing(self, name):
         self.completed_segments += 1
-        self.status_label.setText(f"Segment '{name}' done.")
         if self.completed_segments == len(self.segments):
             self.progress.setVisible(False)
-            self.status_label.setText("✅ All segments extracted!")
             self.load_button.setEnabled(True)
             self.cancel_button.setVisible(False)
             self.view_frames_button.setEnabled(True)
+            self.update_extract_button_state(False)  # Disable extract button after completion
+            self.log_message("Frame extraction finished")
             QMessageBox.information(self, "Done", "All segments have been extracted.")
+    
+    def log_frame_selection_change(self, segment_name, selected_count, total_count):
+        """Log changes to frame selection"""
+        self.log_message(f"Frame selection updated for {segment_name}: {selected_count}/{total_count} frames selected")
     
     def open_frame_browser(self):
         from frame_browser import FrameBrowser
@@ -299,7 +432,7 @@ class VideoWindow(QMainWindow):
             return
 
         self.pause_video()
-        self.status_label.setText("Extracting frames...")
+        self.log_message("Frame extraction started")
         self.load_button.setEnabled(False)
         self.cancel_button.setVisible(True)
         self.progress.setVisible(True)
@@ -341,8 +474,16 @@ class VideoWindow(QMainWindow):
 
             duration_seconds = self.total_frames // self.fps
             self.total_time_label.setText(self.seconds_to_time(duration_seconds))
-            self.status_label.setText("Video loaded. Ready.")
-            self.extract_button.setEnabled(True)
+            
+            # Create default segment for whole video
+            start_time = QTime(0, 0, 0)
+            end_time = QTime(0, 0).addSecs(duration_seconds)
+            self.segments.append({"name": "Full Video", "start": start_time, "end": end_time})
+            item = QListWidgetItem(f"Full Video: {start_time.toString('HH:mm:ss')} → {end_time.toString('HH:mm:ss')}")
+            self.segment_list.addItem(item)
+            
+            self.update_extract_button_state(True)
+            self.log_message("Video loaded")
 
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
@@ -361,7 +502,49 @@ class VideoWindow(QMainWindow):
         item = QListWidgetItem(f"{name}: {start.toString('HH:mm:ss')} → {end.toString('HH:mm:ss')}")
         self.segment_list.addItem(item)
         self.segment_name_input.clear()
+        self.update_extract_button_state(True)  # Re-enable extract button when segments change
+        self.log_message(f"Segment added: {name} ({start.toString('HH:mm:ss')} - {end.toString('HH:mm:ss')})")
 
+    def update_extract_button_state(self, enabled):
+        """Update extract button state and styling"""
+        self.extract_button.setEnabled(enabled)
+        if enabled:
+            # Normal button styling
+            self.extract_button.setStyleSheet("")
+        else:
+            # Disabled styling - darker text
+            self.extract_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #808080;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+    
+    def log_message(self, message):
+        """Add timestamped message to terminal"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        full_message = f"[{timestamp}] {message}"
+        self.terminal_display.append(full_message)
+        # Auto-scroll to bottom
+        cursor = self.terminal_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.terminal_display.setTextCursor(cursor)
+    
+    def toggle_segments(self):
+        """Toggle the visibility of the segments list"""
+        self.segments_collapsed = not self.segments_collapsed
+        self.segment_list.setVisible(not self.segments_collapsed)
+        
+        if self.segments_collapsed:
+            self.segments_button.setText("Segments")
+        else:
+            self.segments_button.setText("Segments ▼")
+    
     def show_segment_menu(self, pos):
         item = self.segment_list.itemAt(pos)
         if not item:
@@ -385,7 +568,7 @@ class VideoWindow(QMainWindow):
             if worker.isRunning():
                 worker.terminate()
                 worker.wait()
-        self.status_label.setText("Extraction cancelled.")
+        # Extraction cancelled
         self.progress.setVisible(False)
         self.load_button.setEnabled(True)
         self.cancel_button.setVisible(False)

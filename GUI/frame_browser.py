@@ -16,6 +16,79 @@ class FrameBrowser(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Extracted Frames")
         self.resize(900, 650)
+        
+        # Set dark theme
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #404040;
+            }
+            QWidget {
+                background-color: #404040;
+                color: #ffffff;
+            }
+            QFrame {
+                background-color: #606060;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background-color: #c0c0c0;
+                border: 1px solid #a0a0a0;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+                color: #000000;
+            }
+            QPushButton:hover {
+                background-color: #d0d0d0;
+            }
+            QPushButton:pressed {
+                background-color: #b0b0b0;
+            }
+            QLabel {
+                color: #ffffff;
+                background-color: transparent;
+            }
+            QTabWidget::pane {
+                border: 1px solid #606060;
+                background-color: #404040;
+            }
+            QTabWidget::tab-bar {
+                alignment: left;
+            }
+            QTabBar::tab {
+                background-color: #606060;
+                color: #ffffff;
+                padding: 8px 12px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #808080;
+            }
+            QTabBar::tab:hover {
+                background-color: #707070;
+            }
+            QScrollArea {
+                background-color: #404040;
+                border: 1px solid #606060;
+            }
+            QCheckBox {
+                color: #ffffff;
+                spacing: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 3px;
+                border: 1px solid #a0a0a0;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border-color: #45a049;
+            }
+        """)
 
         self.selection_file = "frame_selection.json"
         self.selected_frames = self._load_selection()

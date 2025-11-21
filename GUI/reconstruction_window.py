@@ -35,12 +35,49 @@ class ReconstructionWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("3D Reconstruction Viewer")
         self.resize(1100, 700)
+        
+        # Set dark theme for main window
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #404040;
+            }
+            QWidget {
+                background-color: #404040;
+                color: #ffffff;
+            }
+        """)
 
         central = QWidget(self)
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
         side_panel = QFrame(central)
+        side_panel.setStyleSheet("""
+            QFrame {
+                background-color: #606060;
+                border: 0.5px solid #000000;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background-color: #c0c0c0;
+                border: 1px solid #a0a0a0;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+                color: #000000;
+            }
+            QPushButton:hover {
+                background-color: #d0d0d0;
+            }
+            QPushButton:pressed {
+                background-color: #b0b0b0;
+            }
+            QLabel {
+                color: #ffffff;
+                background-color: transparent;
+                border: none;
+            }
+        """)
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(8, 8, 8, 8)
         side_layout.setSpacing(8)
@@ -59,16 +96,26 @@ class ReconstructionWindow(QMainWindow):
         side_layout.addStretch(1)
 
         viewer_container = QWidget(central)
+        viewer_container.setStyleSheet("""
+            QWidget {
+                background-color: #404040;
+                border: 0.5px solid #000000;
+                border-radius: 8px;
+            }
+        """)
         viewer_layout = QVBoxLayout(viewer_container)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
 
         self.placeholder = QLabel("PyVista interactive view not available.", viewer_container)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setStyleSheet("background-color: #404040; color: #ffffff; border: none;")
 
         self.plotter = None
         if PYVISTA_AVAILABLE:
             try:
                 self.plotter = QtInteractor(viewer_container)
+                # Set dark grey background for the 3D render area
+                self.plotter.set_background('#404040')
                 viewer_layout.addWidget(self.plotter, stretch=1)
                 try:
                     self.plotter.show_axes()
@@ -390,7 +437,7 @@ class ReconstructionWindow(QMainWindow):
         self._zoom_controls = QFrame(interactor)
         self._zoom_controls.setObjectName("zoom_controls")
         self._zoom_controls.setStyleSheet("""
-            #zoom_controls {
+            QFrame {
                 background: transparent;
             }
         """)
@@ -424,12 +471,13 @@ class ReconstructionWindow(QMainWindow):
             return
         interactor = self.plotter.interactor
 
-        # Transparent overlay frame
+        # Dark grey overlay frame
         self._manip = QFrame(interactor)
         self._manip.setObjectName("manipulator")
         self._manip.setStyleSheet("""
             #manipulator {
-                background: transparent;
+                background-color: #404040;
+                border-radius: 8px;
             }
         """)
         self._manip.setFixedSize(QSize(140, 140))
@@ -450,9 +498,42 @@ class ReconstructionWindow(QMainWindow):
         btn_center = QPushButton("Home")  # placeholder text
         # Later you can replace with a small axis widget or icon
 
-        for b in (btn_up, btn_down, btn_left, btn_right, btn_center):
+        # Style arrow buttons
+        for b in (btn_up, btn_down, btn_left, btn_right):
             b.setFixedSize(36, 36)
-            b.setStyleSheet("background: rgba(128,128,128,0.8); border-radius:6px; color: white;")
+            b.setStyleSheet("""
+                QPushButton {
+                    background-color: #404040;
+                    color: #c0c0c0;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background-color: #505050;
+                }
+                QPushButton:pressed {
+                    background-color: #303030;
+                }
+            """)
+        
+        # Style center/home button with black border
+        btn_center.setFixedSize(36, 36)
+        btn_center.setStyleSheet("""
+            QPushButton {
+                background-color: #404040;
+                color: #c0c0c0;
+                border: 1px solid black;
+                border-radius: 6px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #505050;
+            }
+            QPushButton:pressed {
+                background-color: #303030;
+            }
+        """)
 
         grid.addWidget(btn_up, 0, 1)
         grid.addWidget(btn_left, 1, 0)

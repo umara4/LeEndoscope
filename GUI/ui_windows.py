@@ -230,7 +230,7 @@ class MainLoginWindow(QWidget, CenteredWidgetMixin):
 
     def _build_ui(self):
         title = QLabel("LeEndoscope")
-        title.setStyleSheet("font-size: 48px; font-weight: bold;")
+        title.setStyleSheet("font-size: 48px; font-weight: bold; color: #ffffff;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         login_btn = QPushButton("Login")
@@ -383,6 +383,7 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         recover_label = QLabel('Forgot your password? <a href="recover"><u>Recover your password</u></a>')
         recover_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         recover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        recover_label.setStyleSheet("QLabel a { color: #90d5ff; text-decoration: underline; }")
         recover_label.linkActivated.connect(self._show_recover_password)
         form.addWidget(recover_label)
 
