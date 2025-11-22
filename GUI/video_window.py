@@ -205,32 +205,46 @@ class VideoWindow(QMainWindow):
         self.segment_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.segment_list.customContextMenuRequested.connect(self.show_segment_menu)
         self.segment_list.setVisible(False)  # Start collapsed
-        self.segment_list.setMaximumHeight(150)  # Limit expansion height
         side_layout.addWidget(self.segment_list)
 
+        # Collapsible Extract Frames section
+        self.extract_collapsed = True
         self.extract_button = QPushButton("Extract Frames")
+        self.extract_button.setFixedHeight(40)
         self.extract_button.setEnabled(False)
-        self.extract_button.clicked.connect(self.start_extraction)
+        self.extract_button.clicked.connect(self.toggle_extract)
         self.update_extract_button_state(False)
         side_layout.addWidget(self.extract_button)
+        
+        # Extract frames content (progress bar and cancel button)
+        self.extract_content = QWidget()
+        extract_layout = QVBoxLayout(self.extract_content)
+        extract_layout.setContentsMargins(5, 5, 5, 5)
+        extract_layout.setSpacing(5)
+        
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        extract_layout.addWidget(self.progress)
+        
+        self.cancel_button = QPushButton("Cancel Extraction")
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_extraction)
+        extract_layout.addWidget(self.cancel_button)
+        
+        self.extract_content.setVisible(False)  # Start collapsed
+        side_layout.addWidget(self.extract_content)
 
         self.view_frames_button = QPushButton("View Extracted Frames")
         self.view_frames_button.setEnabled(False)
         self.view_frames_button.clicked.connect(self.open_frame_browser)
+        self.update_view_frames_button_state(False)
         side_layout.addWidget(self.view_frames_button)
 
         self.reconstruct_button = QPushButton("Start 3D Reconstruction")
+        self.reconstruct_button.setEnabled(False)
         self.reconstruct_button.clicked.connect(self.start_reconstruction)
+        self.update_reconstruct_button_state(False)
         side_layout.addWidget(self.reconstruct_button)
-
-        self.cancel_button = QPushButton("Cancel Extraction")
-        self.cancel_button.setVisible(False)
-        self.cancel_button.clicked.connect(self.cancel_extraction)
-        side_layout.addWidget(self.cancel_button)
-
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        side_layout.addWidget(self.progress)
 
         # Add spacer to push terminal to bottom
         side_layout.addStretch(1)
@@ -265,9 +279,11 @@ class VideoWindow(QMainWindow):
         side_layout.addWidget(self.terminal_display)
 
         # --- Central Viewer ---
-        video_layout = QVBoxLayout()
+        self.video_layout = QVBoxLayout()
         self.viewer_label = QLabel("Video Preview")
         self.viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.viewer_label.setMinimumSize(400, 300)
+        self.viewer_label.setScaledContents(False)
         self.viewer_label.setStyleSheet("""
             QLabel {
                 background-color: #404040;
@@ -277,7 +293,7 @@ class VideoWindow(QMainWindow):
                 font-size: 14px;
             }
         """)
-        video_layout.addWidget(self.viewer_label, 4)
+        self.video_layout.addWidget(self.viewer_label, 4)
 
         timebar_layout = QHBoxLayout()
         self.current_time_label = QLabel("00:00:00")
@@ -289,13 +305,20 @@ class VideoWindow(QMainWindow):
         timebar_layout.addWidget(self.current_time_label)
         timebar_layout.addWidget(self.timeline_slider, 1)
         timebar_layout.addWidget(self.total_time_label)
-        video_layout.addLayout(timebar_layout)
+        self.video_layout.addLayout(timebar_layout)
 
         controls_layout = QHBoxLayout()
         self.back_button = QPushButton("<<")
-        self.play_pause_button = QPushButton()
-        self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.back_button.setObjectName("back_button")
+        self.back_button.setFixedSize(60, 40)
+        
+        self.play_pause_button = QPushButton("▶")
+        self.play_pause_button.setObjectName("play_pause_button")
+        self.play_pause_button.setFixedSize(60, 40)
+        
         self.forward_button = QPushButton(">>")
+        self.forward_button.setObjectName("forward_button")
+        self.forward_button.setFixedSize(60, 40)
 
         self.play_pause_button.clicked.connect(self.toggle_play_pause)
         self.back_button.clicked.connect(lambda: self.skip_frames(-self.fps))
@@ -304,7 +327,7 @@ class VideoWindow(QMainWindow):
         controls_layout.addWidget(self.back_button)
         controls_layout.addWidget(self.play_pause_button)
         controls_layout.addWidget(self.forward_button)
-        video_layout.addLayout(controls_layout)
+        self.video_layout.addLayout(controls_layout)
 
         # --- Segment Controls ---
         segment_controls = QHBoxLayout()
@@ -323,10 +346,10 @@ class VideoWindow(QMainWindow):
         segment_controls.addWidget(QLabel("End"))
         segment_controls.addWidget(self.end_time_input)
         segment_controls.addWidget(self.add_segment_btn)
-        video_layout.addLayout(segment_controls)
+        self.video_layout.addLayout(segment_controls)
 
         main_layout.addWidget(side_panel, 1)
-        main_layout.addLayout(video_layout, 4)
+        main_layout.addLayout(self.video_layout, 4)
         self.setCentralWidget(central_widget)
 
         # State
@@ -391,10 +414,15 @@ class VideoWindow(QMainWindow):
         self.completed_segments += 1
         if self.completed_segments == len(self.segments):
             self.progress.setVisible(False)
-            self.load_button.setEnabled(True)
             self.cancel_button.setVisible(False)
-            self.view_frames_button.setEnabled(True)
+            self.load_button.setEnabled(True)
+            self.update_view_frames_button_state(True)  # Enable view frames button
             self.update_extract_button_state(False)  # Disable extract button after completion
+            # Keep reconstruction button enabled
+            # Collapse the extract widget
+            self.extract_collapsed = True
+            self.extract_content.setVisible(False)
+            self.extract_button.setText("Extract Frames")
             self.log_message("Frame extraction finished")
             QMessageBox.information(self, "Done", "All segments have been extracted.")
     
@@ -427,7 +455,7 @@ class VideoWindow(QMainWindow):
         self.selected_frames = chosen
 
     def start_extraction(self):
-        if not self.cap or not self.segments:
+        if not self.segments:
             QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
             return
 
@@ -435,6 +463,9 @@ class VideoWindow(QMainWindow):
         self.log_message("Frame extraction started")
         self.load_button.setEnabled(False)
         self.cancel_button.setVisible(True)
+        self.progress.setVisible(True)
+        # Enable reconstruction button when extraction starts
+        self.update_reconstruct_button_state(True)
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.segment_progress.clear()
@@ -482,7 +513,13 @@ class VideoWindow(QMainWindow):
             item = QListWidgetItem(f"Full Video: {start_time.toString('HH:mm:ss')} → {end_time.toString('HH:mm:ss')}")
             self.segment_list.addItem(item)
             
+            # Update height if segments are expanded
+            if not self.segments_collapsed:
+                self.update_segment_list_height()
+            
             self.update_extract_button_state(True)
+            self.update_view_frames_button_state(False)  # Disabled until frames extracted
+            self.update_reconstruct_button_state(False)  # Disabled until extraction starts
             self.log_message("Video loaded")
 
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -503,17 +540,85 @@ class VideoWindow(QMainWindow):
         self.segment_list.addItem(item)
         self.segment_name_input.clear()
         self.update_extract_button_state(True)  # Re-enable extract button when segments change
-        self.log_message(f"Segment added: {name} ({start.toString('HH:mm:ss')} - {end.toString('HH:mm:ss')})")
+        # Update height if widget is expanded
+        if not self.segments_collapsed:
+            self.update_segment_list_height()
+        self.log_message(f"{name} added")
 
     def update_extract_button_state(self, enabled):
         """Update extract button state and styling"""
         self.extract_button.setEnabled(enabled)
         if enabled:
-            # Normal button styling
-            self.extract_button.setStyleSheet("")
-        else:
-            # Disabled styling - darker text
+            # Normal button styling - black text
             self.extract_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #000000;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            # Disabled styling - darker grey text
+            self.extract_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #808080;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+    
+    def update_view_frames_button_state(self, enabled):
+        """Update view frames button state and styling"""
+        self.view_frames_button.setEnabled(enabled)
+        if enabled:
+            # Normal button styling - black text
+            self.view_frames_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #000000;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            # Disabled styling - darker grey text
+            self.view_frames_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #808080;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+    
+    def update_reconstruct_button_state(self, enabled):
+        """Update reconstruction button state and styling"""
+        self.reconstruct_button.setEnabled(enabled)
+        if enabled:
+            # Normal button styling - black text
+            self.reconstruct_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #000000;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            # Disabled styling - darker grey text
+            self.reconstruct_button.setStyleSheet("""
                 QPushButton {
                     background-color: #c0c0c0;
                     color: #808080;
@@ -535,6 +640,37 @@ class VideoWindow(QMainWindow):
         cursor.movePosition(cursor.MoveOperation.End)
         self.terminal_display.setTextCursor(cursor)
     
+    def toggle_extract(self):
+        """Toggle the extract frames section or start extraction"""
+        if self.extract_button.isEnabled():
+            # If button is enabled and collapsed, expand and start extraction
+            if self.extract_collapsed:
+                self.extract_collapsed = False
+                self.extract_content.setVisible(True)
+                self.extract_button.setText("Extract Frames ▼")
+                self.start_extraction()
+            else:
+                # If already expanded, just collapse
+                self.extract_collapsed = True
+                self.extract_content.setVisible(False)
+                self.extract_button.setText("Extract Frames")
+    
+    def update_segment_list_height(self):
+        """Adjust segment list height based on number of items"""
+        count = self.segment_list.count()
+        if count == 0:
+            # Minimum height for at least 1 item space
+            item_height = 40
+        else:
+            # Calculate height based on actual items
+            item_height = self.segment_list.sizeHintForRow(0) if count > 0 else 40
+        
+        # Set height: spacing + border + (item_height * count), with minimum of 1 item
+        total_height = max(item_height * max(count, 1) + 10, 50)
+        # Cap at reasonable maximum (e.g., 5 items)
+        max_height = item_height * 5 + 10
+        self.segment_list.setFixedHeight(min(total_height, max_height))
+    
     def toggle_segments(self):
         """Toggle the visibility of the segments list"""
         self.segments_collapsed = not self.segments_collapsed
@@ -544,6 +680,8 @@ class VideoWindow(QMainWindow):
             self.segments_button.setText("Segments")
         else:
             self.segments_button.setText("Segments ▼")
+            # Adjust height based on number of segments
+            self.update_segment_list_height()
     
     def show_segment_menu(self, pos):
         item = self.segment_list.itemAt(pos)
@@ -570,10 +708,20 @@ class VideoWindow(QMainWindow):
                 worker.wait()
         # Extraction cancelled
         self.progress.setVisible(False)
+        self.cancel_button.setVisible(False)
         self.load_button.setEnabled(True)
+        # Collapse the extract widget
+        self.extract_collapsed = True
+        self.extract_content.setVisible(False)
+        self.extract_button.setText("Extract Frames")
+        self.log_message("Frame extraction cancelled")
         self.cancel_button.setVisible(False)
 
     def start_reconstruction(self):
+        # Save current geometry before transitioning
+        geo = self.geometry()
+        save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+        
         # Open the reconstruction window (separate UI) without checking selected frames.
         try:
             from reconstruction_window import ReconstructionWindow
@@ -608,10 +756,10 @@ class VideoWindow(QMainWindow):
     def toggle_play_pause(self):
         if self.timer.isActive():
             self.timer.stop()
-            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-start"))
+            self.play_pause_button.setText("▶")  # Play symbol
         else:
             self.timer.start(int(1000 / self.fps))
-            self.play_pause_button.setIcon(QIcon.fromTheme("media-playback-pause"))
+            self.play_pause_button.setText("⏸")  # Pause symbol
 
     def skip_frames(self, count):
         new_frame = max(0, min(self.total_frames - 1, self.current_frame + count))

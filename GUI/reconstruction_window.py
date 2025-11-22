@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QFrame, QMessageBox, QGridLayout, QStyle
 )
 from PyQt6.QtCore import Qt, QEvent, QSize
+from geometry_store import load_geometry, save_geometry, get_start_size
 
 try:
     import importlib
@@ -34,7 +35,14 @@ class ReconstructionWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("3D Reconstruction Viewer")
-        self.resize(1100, 700)
+        
+        # Load saved geometry
+        g = load_geometry()
+        if g:
+            self.setGeometry(g[0], g[1], g[2], g[3])
+        else:
+            start_w, start_h = get_start_size()
+            self.resize(start_w, start_h)
         
         # Set dark theme for main window
         self.setStyleSheet("""
@@ -136,6 +144,22 @@ class ReconstructionWindow(QMainWindow):
         self.cam_center = (0.0, 0.0, 0.0)
         self.cam_dist = 1.0
         self.cam_az = 45.0
+
+    def moveEvent(self, event):
+        """Save geometry when window is moved"""
+        super().moveEvent(event)
+        geo = self.geometry()
+        save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+
+    def resizeEvent(self, event):
+        """Save geometry when window is resized"""
+        super().resizeEvent(event)
+        geo = self.geometry()
+        save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
+        if hasattr(self, '_manip') and self._manip:
+            self._position_manip()
+        if hasattr(self, 'zoom_controls') and self.zoom_controls:
+            self._position_zoom_controls()
         self.cam_el = 30.0
 
         if not PYVISTA_AVAILABLE:
