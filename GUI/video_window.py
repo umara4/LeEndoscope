@@ -65,7 +65,7 @@ class SegmentExtractor(QThread):
         cap = cv2.VideoCapture(self.video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
 
-        interval = int(cap.get(cv2.CAP_PROP_FPS) // self.fps) if self.fps > 0 else 1
+        interval = max(1, int(cap.get(cv2.CAP_PROP_FPS) // self.fps)) if self.fps > 0 else 1
         frame_count, saved_count = self.start_frame, 0
 
         while frame_count < self.end_frame:
@@ -362,10 +362,28 @@ class VideoWindow(QMainWindow):
         self.worker_threads = []
         self.segment_progress = {}
         self.completed_segments = 0
+        self.current_video_id = None
         self.selected_frames = {}
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
+        self.slider_base_style = """
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px;
+                background: #606060;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #c0c0c0;
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+        """
+        self.timeline_slider.setStyleSheet(self.slider_base_style)
 
     def pause_video(self):
         if self.timer.isActive():
@@ -429,30 +447,35 @@ class VideoWindow(QMainWindow):
     def log_frame_selection_change(self, segment_name, selected_count, total_count):
         """Log changes to frame selection"""
         self.log_message(f"Frame selection updated for {segment_name}: {selected_count}/{total_count} frames selected")
-    
+
     def open_frame_browser(self):
         from frame_browser import FrameBrowser
-        # ✅ pass both segment name and folder path
+        if not self.video_path:
+            QMessageBox.warning(self, "No Video", "Load a video before viewing frames.")
+            return
+
         segments = [(seg["name"], f"{seg['name'].replace(' ', '_')}_frame_output") for seg in self.segments]
-        
-        # Use the local SegmentExtractor class defined in this module (no external import)
-        for seg in self.segments:
-            folder_path = f"{seg['name'].replace(' ', '_')}_frame_output"
-            extractor = SegmentExtractor(self.video_path, folder_path, 0, 0, 1, seg["name"])  # start_frame and end_frame are irrelevant here
-            selected, rejected = extractor.eval_frames()
-            if folder_path not in self.selected_frames:
-                self.selected_frames[folder_path] = {}
-            for filename, snr, sharpness in rejected:
-                self.selected_frames[folder_path][filename] = {"checked": False, "modified": False}
-       
-        browser = FrameBrowser(segments, self)
+
+        initial_selection = {folder: images.copy() for folder, images in self.selected_frames.items()}
+        # Filtering hook: if you add a filter/scoring routine, populate initial_selection
+        # with any frames you wish to auto-uncheck before opening the browser.
+        # Example (disabled):
+        # for seg in self.segments:
+        #     folder_path = f"{seg['name'].replace(' ', '_')}_frame_output"
+        #     results = run_filter(folder_path)
+        #     initial_selection[folder_path] = results
+
+        browser = FrameBrowser(
+            segments,
+            video_id=self.current_video_id or self.video_path,
+            parent=self,
+            initial_selection=initial_selection
+        )
         browser.exec()
 
-        # After closing, you can access selections:
         chosen = browser.selected_frames
-        #print("User selected frames:", chosen)
-        # chosen is a dict: {folder_path: {img_name: {"checked": bool, "modified": bool}}}
         self.selected_frames = chosen
+
 
     def start_extraction(self):
         if not self.segments:
@@ -492,10 +515,13 @@ class VideoWindow(QMainWindow):
         )
         if file_name:
             self.video_path = file_name
+            self.current_video_id = os.path.abspath(file_name)
             self.cap = cv2.VideoCapture(file_name)
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
             self.current_frame = 0
+            # Reset any previous frame selections when a new video is loaded
+            self.selected_frames = {}
 
             self.timeline_slider.setMaximum(self.total_frames - 1)
             self.timeline_slider.setEnabled(True)
@@ -505,19 +531,10 @@ class VideoWindow(QMainWindow):
 
             duration_seconds = self.total_frames // self.fps
             self.total_time_label.setText(self.seconds_to_time(duration_seconds))
-            
-            # Create default segment for whole video
-            start_time = QTime(0, 0, 0)
-            end_time = QTime(0, 0).addSecs(duration_seconds)
-            self.segments.append({"name": "Full Video", "start": start_time, "end": end_time})
-            item = QListWidgetItem(f"Full Video: {start_time.toString('HH:mm:ss')} → {end_time.toString('HH:mm:ss')}")
-            self.segment_list.addItem(item)
-            
-            # Update height if segments are expanded
-            if not self.segments_collapsed:
-                self.update_segment_list_height()
-            
-            self.update_extract_button_state(True)
+            self.refresh_timeline_highlight()
+
+            # Require user-defined segments before extraction
+            self.update_extract_button_state(False)
             self.update_view_frames_button_state(False)  # Disabled until frames extracted
             self.update_reconstruct_button_state(False)  # Disabled until extraction starts
             self.log_message("Video loaded")
@@ -544,6 +561,7 @@ class VideoWindow(QMainWindow):
         if not self.segments_collapsed:
             self.update_segment_list_height()
         self.log_message(f"{name} added")
+        self.refresh_timeline_highlight()
 
     def update_extract_button_state(self, enabled):
         """Update extract button state and styling"""
@@ -587,6 +605,12 @@ class VideoWindow(QMainWindow):
                     padding: 8px;
                     font-weight: bold;
                 }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+                QPushButton:pressed {
+                    background-color: #b0b0b0;
+                }
             """)
         else:
             # Disabled styling - darker grey text
@@ -615,6 +639,12 @@ class VideoWindow(QMainWindow):
                     padding: 8px;
                     font-weight: bold;
                 }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+                QPushButton:pressed {
+                    background-color: #b0b0b0;
+                }
             """)
         else:
             # Disabled styling - darker grey text
@@ -642,6 +672,9 @@ class VideoWindow(QMainWindow):
     
     def toggle_extract(self):
         """Toggle the extract frames section or start extraction"""
+        if not self.segments:
+            QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
+            return
         if self.extract_button.isEnabled():
             # If button is enabled and collapsed, expand and start extraction
             if self.extract_collapsed:
@@ -670,6 +703,50 @@ class VideoWindow(QMainWindow):
         # Cap at reasonable maximum (e.g., 5 items)
         max_height = item_height * 5 + 10
         self.segment_list.setFixedHeight(min(total_height, max_height))
+
+    def refresh_timeline_highlight(self):
+        """Highlight slider regions for defined segments."""
+        if not self.total_frames:
+            self.timeline_slider.setStyleSheet(self.slider_base_style)
+            return
+
+        total = max(1, self.total_frames - 1)
+        stops = [(0.0, "#606060")]
+        epsilon = 1.0 / max(10_000, total)  # tiny, stays within [0,1]
+        for seg in self.segments:
+            start_sec = QTime(0, 0).secsTo(seg["start"])
+            end_sec = QTime(0, 0).secsTo(seg["end"])
+            start_frame = max(0, int(start_sec * self.fps))
+            end_frame = max(start_frame + 1, int(end_sec * self.fps))
+            start_ratio = max(0.0, min(1.0, start_frame / total))
+            end_ratio = max(start_ratio + epsilon, min(1.0, end_frame / total))
+            stops.extend([
+                (start_ratio, "#606060"),
+                (min(1.0, start_ratio + epsilon), "#80c080"),
+                (end_ratio, "#80c080"),
+                (min(1.0, end_ratio + epsilon), "#606060"),
+            ])
+        stops.append((1.0, "#606060"))
+        stops = sorted({(pos, color) for pos, color in stops}, key=lambda x: x[0])
+        stop_str = ",\n        ".join(f"stop:{pos:.4f} {color}" for pos, color in stops)
+        style = f"""
+            QSlider::groove:horizontal {{
+                border: 1px solid #999999;
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    {stop_str});
+                margin: 2px 0;
+                border-radius: 4px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #c0c0c0;
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }}
+        """
+        self.timeline_slider.setStyleSheet(style)
     
     def toggle_segments(self):
         """Toggle the visibility of the segments list"""
@@ -700,6 +777,7 @@ class VideoWindow(QMainWindow):
         elif action == delete_action:
             self.segments.pop(index)
             self.segment_list.takeItem(index)
+            self.refresh_timeline_highlight()
 
     def cancel_extraction(self):
         for worker in self.worker_threads:
@@ -732,7 +810,7 @@ class VideoWindow(QMainWindow):
         # Directly show the reconstruction UI and hide this window.
         self.recon_window = ReconstructionWindow(parent=self)
         self.recon_window.show()
-        self.hide()
+        # Keep the video window open to reduce perceived lag and allow easy return.
 
     def update_preview(self, frame):
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

@@ -9,13 +9,17 @@ from PyQt6.QtCore import Qt
 
 
 class FrameBrowser(QDialog):
-    def __init__(self, segments, parent=None):
+    def __init__(self, segments, video_id=None, parent=None, initial_selection=None):
         """
         segments: list of tuples -> [(segment_name, folder_path), ...]
+        video_id: unique identifier for the loaded video (e.g., absolute path)
+        initial_selection: optional seed data to merge for this video
         """
         super().__init__(parent)
         self.setWindowTitle("Extracted Frames")
         self.resize(900, 650)
+        self.video_id = video_id or "__default__"
+        self.initial_selection = initial_selection or {}
         
         # Set dark theme
         self.setStyleSheet("""
@@ -91,7 +95,9 @@ class FrameBrowser(QDialog):
         """)
 
         self.selection_file = "frame_selection.json"
-        self.selected_frames = self._load_selection()
+        self.store, self.selected_frames = self._load_selection()
+        self.segment_folders = {folder for _, folder in segments}
+        self._merge_initial_selection()
 
         main_layout = QVBoxLayout(self)
 
@@ -124,6 +130,9 @@ class FrameBrowser(QDialog):
                 # Ensure image entry exists with defaults
                 if img_name not in self.selected_frames[folder]:
                     self.selected_frames[folder][img_name] = {"checked": True, "modified": False}
+                # Filtering algorithm hook (disabled):
+                # if not custom_filter(path):
+                #     self.selected_frames[folder][img_name]["checked"] = False
 
                 # Thumbnail
                 thumb = QPixmap(path).scaled(160, 90, Qt.AspectRatioMode.KeepAspectRatio)
@@ -155,7 +164,7 @@ class FrameBrowser(QDialog):
                     total_checked += 1
 
             scroll.setWidget(container)
-            self.tabs.addTab(scroll, seg_name)  # ✅ clean segment name
+            self.tabs.addTab(scroll, seg_name)
 
         # Footer with actions
         action_bar = QHBoxLayout()
@@ -175,12 +184,7 @@ class FrameBrowser(QDialog):
             self.selected_frames[folder][img_name]["modified"] = True
 
         # Update summary live
-        total_checked, total_images = 0, 0
-        for folder_key, images in self.selected_frames.items():
-            for _, data in images.items():
-                total_images += 1
-                if data["checked"]:
-                    total_checked += 1
+        total_checked, total_images = self._compute_counts()
         self._update_summary(total_checked, total_images)
 
     def open_full_preview(self, path):
@@ -197,36 +201,79 @@ class FrameBrowser(QDialog):
         preview.exec()
 
     def save_selection(self):
-        self._save_selection(self.selected_frames)
-        total_checked, total_images = 0, 0
-        for folder_key, images in self.selected_frames.items():
-            for _, data in images.items():
-                total_images += 1
-                if data["checked"]:
-                    total_checked += 1
+        self.store.setdefault("videos", {})[self.video_id] = self.selected_frames
+        self._save_selection()
+        total_checked, total_images = self._compute_counts()
         self._update_summary(total_checked, total_images)
         QMessageBox.information(self, "Selection Saved", f"{total_checked} of {total_images} frames marked for use.")
 
     def _update_summary(self, checked, total):
         self.summary_label.setText(f"Selected: {checked} / {total}")
 
+    def closeEvent(self, event):
+        # Persist selections automatically when closing the dialog
+        try:
+            self.store.setdefault("videos", {})[self.video_id] = self.selected_frames
+            self._save_selection()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _load_selection(self):
+        # Store shape: {"videos": {video_id: {folder: {img: {...}}}}}
+        base = {"videos": {}}
         if os.path.exists(self.selection_file):
             try:
                 with open(self.selection_file, "r") as f:
                     data = json.load(f)
-                # 🔧 Migration: convert old list format to dict
-                for folder, val in data.items():
-                    if isinstance(val, list):
-                        data[folder] = {img: {"checked": True, "modified": False} for img in val}
-                return data
+                if isinstance(data, dict) and "videos" in data and isinstance(data["videos"], dict):
+                    base = {"videos": data["videos"]}
+                elif isinstance(data, dict):
+                    # Legacy shape: {folder: [imgs] or {img: meta}}
+                    migrated = {}
+                    for folder, val in data.items():
+                        if isinstance(val, list):
+                            migrated[folder] = {img: {"checked": True, "modified": False} for img in val}
+                        elif isinstance(val, dict):
+                            migrated[folder] = {}
+                            for img, meta in val.items():
+                                if isinstance(meta, dict):
+                                    migrated[folder][img] = {
+                                        "checked": bool(meta.get("checked", True)),
+                                        "modified": bool(meta.get("modified", False))
+                                    }
+                                else:
+                                    migrated[folder][img] = {"checked": bool(meta), "modified": False}
+                    base = {"videos": {"__legacy__": migrated}}
             except Exception:
-                return {}
-        return {}
+                base = {"videos": {}}
+        videos = base.setdefault("videos", {})
+        selected = videos.setdefault(self.video_id, {})
+        return base, selected
 
-    def _save_selection(self, data):
+    def _merge_initial_selection(self):
+        """Merge any provided seed selection for this video without overwriting saved choices."""
+        for folder, images in self.initial_selection.items():
+            target = self.selected_frames.setdefault(folder, {})
+            for img, meta in images.items():
+                if img not in target:
+                    checked = meta.get("checked", True) if isinstance(meta, dict) else bool(meta)
+                    target[img] = {"checked": bool(checked), "modified": False}
+
+    def _compute_counts(self):
+        total_checked, total_images = 0, 0
+        for folder_key, images in self.selected_frames.items():
+            if self.segment_folders and folder_key not in self.segment_folders:
+                continue
+            for _, data in images.items():
+                total_images += 1
+                if data.get("checked"):
+                    total_checked += 1
+        return total_checked, total_images
+
+    def _save_selection(self):
         try:
             with open(self.selection_file, "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(self.store, f, indent=2)
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Could not save selection:\n{e}")
