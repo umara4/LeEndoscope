@@ -206,6 +206,14 @@ class FrameBrowser(QDialog):
         total_checked, total_images = self._compute_counts()
         self._update_summary(total_checked, total_images)
         QMessageBox.information(self, "Selection Saved", f"{total_checked} of {total_images} frames marked for use.")
+        # Close the browser after saving so caller resumes automatically
+        try:
+            self.accept()
+        except Exception:
+            try:
+                self.close()
+            except Exception:
+                pass
 
     def _update_summary(self, checked, total):
         self.summary_label.setText(f"Selected: {checked} / {total}")

@@ -1,3 +1,208 @@
+"""
+Video capture window: select camera, start live preview+recording, stop, export frames.
+"""
+from pathlib import Path
+import cv2
+from datetime import datetime
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtWidgets import (
+    QWidget, QLabel, QPushButton, QComboBox, QVBoxLayout, QHBoxLayout,
+    QFileDialog, QMessageBox
+)
+
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+RECORDINGS_DIR.mkdir(exist_ok=True)
+
+def probe_cameras(max_probe=6, timeout_ms=200):
+    available = []
+    for i in range(max_probe):
+        # Use DirectShow backend on Windows for better compatibility
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        ret, _ = cap.read()
+        if ret:
+            available.append(i)
+        cap.release()
+    return available
+
+class VideoWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Capture")
+        self.capture = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_frame)
+        self.recording = False
+        self.writer = None
+        self.current_frame = None
+
+        self.camera_combo = QComboBox()
+        self._refresh_cameras()
+
+        self.refresh_btn = QPushButton("Refresh Cameras")
+        self.refresh_btn.clicked.connect(self._refresh_cameras)
+
+        self.start_btn = QPushButton("Start Video Capture")
+        self.start_btn.clicked.connect(self.start_capture)
+
+        self.stop_btn = QPushButton("Stop Recording")
+        self.stop_btn.clicked.connect(self.stop_capture)
+        self.stop_btn.setEnabled(False)
+
+        self.export_frames_btn = QPushButton("Export Frames")
+        self.export_frames_btn.clicked.connect(self.export_frames)
+        self.export_frames_btn.setEnabled(False)
+
+        self.segment_btn = QPushButton("Run Segmentation (placeholder)")
+        self.segment_btn.clicked.connect(self.run_segmentation)
+        self.segment_btn.setEnabled(False)
+
+        self.video_label = QLabel("No camera running")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setMinimumSize(640, 480)
+
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(self.camera_combo)
+        top_layout.addWidget(self.refresh_btn)
+        top_layout.addWidget(self.start_btn)
+        top_layout.addWidget(self.stop_btn)
+
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addWidget(self.export_frames_btn)
+        bottom_layout.addWidget(self.segment_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top_layout)
+        layout.addWidget(self.video_label)
+        layout.addLayout(bottom_layout)
+
+    def _refresh_cameras(self):
+        self.camera_combo.clear()
+        cams = probe_cameras()
+        if not cams:
+            self.camera_combo.addItem("No cameras found", -1)
+        else:
+            for c in cams:
+                self.camera_combo.addItem(f"Camera {c}", c)
+
+    def start_capture(self):
+        idx = self.camera_combo.currentData()
+        if idx is None or idx == -1:
+            QMessageBox.warning(self, "No camera", "Please select a valid camera.")
+            return
+
+        self.capture = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not self.capture.isOpened():
+            QMessageBox.critical(self, "Error", f"Cannot open camera {idx}")
+            return
+
+        # prepare writer (start recording immediately)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = RECORDINGS_DIR / f"recording_{idx}_{timestamp}.mp4"
+        ret, frame = self.capture.read()
+        if not ret:
+            QMessageBox.critical(self, "Error", "Failed to read from camera.")
+            self.capture.release()
+            self.capture = None
+            return
+
+        h, w = frame.shape[:2]
+        fps = self.capture.get(cv2.CAP_PROP_FPS) or 20.0
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self.writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        if not self.writer.isOpened():
+            QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
+            self.writer = None
+
+        self.recording = True
+        self.stop_btn.setEnabled(True)
+        self.start_btn.setEnabled(False)
+        self.export_frames_btn.setEnabled(False)
+        self.segment_btn.setEnabled(False)
+
+        self.current_frame = frame
+        self._show_frame(frame)
+        self.timer.start(int(1000 / max(1, fps)))
+
+    def _update_frame(self):
+        if self.capture is None:
+            return
+        ret, frame = self.capture.read()
+        if not ret:
+            return
+        self.current_frame = frame
+        if self.recording and self.writer is not None:
+            try:
+                self.writer.write(frame)
+            except Exception:
+                pass
+        self._show_frame(frame)
+
+    def _show_frame(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        qt_img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(qt_img).scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.video_label.setPixmap(pix)
+
+    def stop_capture(self):
+        self.timer.stop()
+        if self.capture is not None:
+            self.capture.release()
+            self.capture = None
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+        self.recording = False
+        self.stop_btn.setEnabled(False)
+        self.start_btn.setEnabled(True)
+        self.export_frames_btn.setEnabled(True)
+        self.segment_btn.setEnabled(True)
+        QMessageBox.information(self, "Stopped", "Recording stopped and saved to recordings/")
+
+    def export_frames(self):
+        rec_file, _ = QFileDialog.getOpenFileName(self, "Select recording to export frames", str(RECORDINGS_DIR), "Video Files (*.mp4 *.avi)")
+        if not rec_file:
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "Choose output folder for frames", str(RECORDINGS_DIR))
+        if not out_dir:
+            return
+        self._extract_frames(str(rec_file), Path(out_dir))
+        QMessageBox.information(self, "Exported", f"Frames exported to {out_dir}")
+
+    def _extract_frames(self, video_path, out_dir: Path, step=1):
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cap = cv2.VideoCapture(video_path)
+        idx = 0
+        saved = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if idx % step == 0:
+                fname = out_dir / f"frame_{idx:06d}.png"
+                cv2.imwrite(str(fname), frame)
+                saved += 1
+            idx += 1
+        cap.release()
+        return saved
+
+    def run_segmentation(self):
+        QMessageBox.information(self, "Segmentation", "Segmentation routine placeholder. Implement your model here.")
+
+if __name__ == "__main__":
+    from PyQt6.QtWidgets import QApplication
+    import sys
+    app = QApplication(sys.argv)
+    w = VideoWindow()
+    w.show()
+    sys.exit(app.exec())
 import os
 import cv2
 import numpy as np
@@ -193,6 +398,51 @@ class VideoWindow(QMainWindow):
         self.load_button = QPushButton("Load Video")
         self.load_button.clicked.connect(self.load_video_file)
         side_layout.addWidget(self.load_button)
+
+        # Collapsible Start Camera section
+        self.camera_panel_collapsed = True
+        self.camera_button = QPushButton("Start Camera")
+        self.camera_button.setFixedHeight(40)
+        self.camera_button.clicked.connect(self.toggle_camera_panel)
+        side_layout.addWidget(self.camera_button)
+
+        # Camera content (hidden by default)
+        self.camera_content = QWidget()
+        cam_layout = QVBoxLayout(self.camera_content)
+        cam_layout.setContentsMargins(5, 5, 5, 5)
+        cam_layout.setSpacing(6)
+
+        self.camera_combo = QComboBox()
+        cams = []
+        try:
+            cams = probe_cameras()
+        except Exception:
+            pass
+        if not cams:
+            self.camera_combo.addItem("No cameras found", -1)
+        else:
+            for c in cams:
+                self.camera_combo.addItem(f"Camera {c}", c)
+        # auto-refresh when selection changes
+        self.camera_combo.currentIndexChanged.connect(self.on_camera_selected)
+
+        # Recording controls inside collapsible area
+        btn_layout = QHBoxLayout()
+        self.start_record_btn = QPushButton("Start Recording")
+        self.start_record_btn.clicked.connect(self.start_camera_recording)
+        self.start_record_btn.setEnabled(False)
+
+        self.stop_record_btn = QPushButton("Stop Recording")
+        self.stop_record_btn.clicked.connect(self.stop_camera_recording)
+        self.stop_record_btn.setEnabled(False)
+
+        btn_layout.addWidget(self.start_record_btn)
+        btn_layout.addWidget(self.stop_record_btn)
+
+        cam_layout.addWidget(self.camera_combo)
+        cam_layout.addLayout(btn_layout)
+        self.camera_content.setVisible(False)
+        side_layout.addWidget(self.camera_content)
 
         # Collapsible Segments section
         self.segments_collapsed = True
@@ -514,36 +764,40 @@ class VideoWindow(QMainWindow):
             self, "Select Video File", "", "Video Files (*.mp4 *.avi *.mov *.mkv)"
         )
         if file_name:
-            self.video_path = file_name
-            self.current_video_id = os.path.abspath(file_name)
-            self.cap = cv2.VideoCapture(file_name)
-            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
-            self.current_frame = 0
-            # Reset any previous frame selections when a new video is loaded
-            self.selected_frames = {}
+            self.load_video_from_path(file_name)
 
-            self.timeline_slider.setMaximum(self.total_frames - 1)
-            self.timeline_slider.setEnabled(True)
+    def load_video_from_path(self, file_name):
+        # Load a video file path into the player (shared by file dialog and auto-load)
+        self.video_path = file_name
+        self.current_video_id = os.path.abspath(file_name)
+        self.cap = cv2.VideoCapture(file_name)
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
+        self.current_frame = 0
+        # Reset any previous frame selections when a new video is loaded
+        self.selected_frames = {}
 
-            self.segment_list.clear()
-            self.segments = []
+        self.timeline_slider.setMaximum(max(0, self.total_frames - 1))
+        self.timeline_slider.setEnabled(True)
 
-            duration_seconds = self.total_frames // self.fps
-            self.total_time_label.setText(self.seconds_to_time(duration_seconds))
-            self.refresh_timeline_highlight()
+        self.segment_list.clear()
+        self.segments = []
 
-            # Require user-defined segments before extraction
-            self.update_extract_button_state(False)
-            self.update_view_frames_button_state(False)  # Disabled until frames extracted
-            self.update_reconstruct_button_state(False)  # Disabled until extraction starts
-            self.log_message("Video loaded")
+        duration_seconds = self.total_frames // max(1, self.fps)
+        self.total_time_label.setText(self.seconds_to_time(duration_seconds))
+        self.refresh_timeline_highlight()
 
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = self.cap.read()
-            if ret:
-                self.update_preview(frame)
-                self.current_time_label.setText("00:00:00")
+        # Require user-defined segments before extraction
+        self.update_extract_button_state(False)
+        self.update_view_frames_button_state(False)  # Disabled until frames extracted
+        self.update_reconstruct_button_state(False)  # Disabled until extraction starts
+        self.log_message("Video loaded")
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = self.cap.read()
+        if ret:
+            self.update_preview(frame)
+            self.current_time_label.setText("00:00:00")
 
     def add_segment(self):
         name = self.segment_name_input.text().strip() or f"Segment {len(self.segments)+1}"
@@ -819,6 +1073,162 @@ class VideoWindow(QMainWindow):
         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image).scaled(self.viewer_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
         self.viewer_label.setPixmap(pixmap)
+
+    # --- Camera capture methods (collapsible panel) ---
+    def toggle_camera_panel(self):
+        self.camera_panel_collapsed = not self.camera_panel_collapsed
+        self.camera_content.setVisible(not self.camera_panel_collapsed)
+        if self.camera_panel_collapsed:
+            self.camera_button.setText("Start Camera")
+        else:
+            self.camera_button.setText("Start Camera ▼")
+            # ensure camera list is up to date when expanded
+            try:
+                cams = probe_cameras()
+            except Exception:
+                cams = []
+            self.camera_combo.clear()
+            if not cams:
+                self.camera_combo.addItem("No cameras found", -1)
+            else:
+                for c in cams:
+                    self.camera_combo.addItem(f"Camera {c}", c)
+
+    def on_camera_selected(self, index):
+        idx = self.camera_combo.itemData(index)
+        if idx is None or idx == -1:
+            return
+        # stop any existing camera preview
+        if getattr(self, 'cam_timer', None) and self.cam_timer.isActive():
+            self.cam_timer.stop()
+        if getattr(self, 'cam_capture', None):
+            try:
+                self.cam_capture.release()
+            except Exception:
+                pass
+            self.cam_capture = None
+
+        # open new camera for preview (not recording)
+        self.cam_capture = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not self.cam_capture or not self.cam_capture.isOpened():
+            QMessageBox.warning(self, "Camera", f"Unable to open camera {idx}")
+            return
+
+        # enable start recording button now that preview is available
+        self.start_record_btn.setEnabled(True)
+        self.stop_record_btn.setEnabled(False)
+
+        # start preview timer
+        fps = self.cam_capture.get(cv2.CAP_PROP_FPS) or 20.0
+        self.cam_timer = QTimer(self)
+        self.cam_timer.timeout.connect(self._update_camera_frame)
+        self.cam_timer.start(int(1000 / max(1, fps)))
+
+        self.cam_recording = False
+        self.cam_writer = None
+        self.last_camera_recording = None
+        self.recording_start_time = None
+        self.log_message(f"Camera switched to Camera {idx}")
+
+    def _update_camera_frame(self):
+        if not getattr(self, 'cam_capture', None):
+            return
+        ret, frame = self.cam_capture.read()
+        if not ret:
+            return
+        # show preview
+        self.update_preview(frame)
+        # record if active
+        if getattr(self, 'cam_recording', False) and getattr(self, 'cam_writer', None):
+            try:
+                self.cam_writer.write(frame)
+            except Exception:
+                pass
+
+    def start_camera_recording(self):
+        if not getattr(self, 'cam_capture', None) or not self.cam_capture.isOpened():
+            QMessageBox.warning(self, "No Preview", "Start camera preview before recording.")
+            return
+        # prepare writer
+        idx = None
+        # try to find selected camera index
+        cur = self.camera_combo.currentIndex()
+        idx = self.camera_combo.itemData(cur)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = RECORDINGS_DIR / f"camera_recording_{idx}_{timestamp}.mp4"
+        # grab a frame to get size
+        ret, frame = self.cam_capture.read()
+        if not ret:
+            QMessageBox.warning(self, "Error", "Unable to read frame to start recording.")
+            return
+        h, w = frame.shape[:2]
+        fps = self.cam_capture.get(cv2.CAP_PROP_FPS) or 20.0
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self.cam_writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        if not self.cam_writer.isOpened():
+            self.cam_writer = None
+            QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
+
+        self.cam_recording = True
+        self.recording_start_time = datetime.now()
+        self.last_camera_recording = str(out_path)
+        self.start_record_btn.setEnabled(False)
+        self.stop_record_btn.setEnabled(True)
+        ts = self.recording_start_time.strftime("%Y-%m-%d %H:%M:%S")
+        self.log_message(f"Recording started at {ts}")
+
+    def stop_camera_recording(self):
+        if not getattr(self, 'cam_recording', False):
+            return
+        # stop writer
+        if getattr(self, 'cam_writer', None):
+            try:
+                self.cam_writer.release()
+            except Exception:
+                pass
+            self.cam_writer = None
+        # also stop preview timer and release camera if present
+        if getattr(self, 'cam_timer', None) and self.cam_timer.isActive():
+            try:
+                self.cam_timer.stop()
+            except Exception:
+                pass
+        if getattr(self, 'cam_capture', None):
+            try:
+                self.cam_capture.release()
+            except Exception:
+                pass
+            self.cam_capture = None
+
+        self.cam_recording = False
+        self.stop_record_btn.setEnabled(False)
+        self.start_record_btn.setEnabled(True)
+
+        # compute duration and log concise message
+        duration = None
+        if getattr(self, 'recording_start_time', None):
+            end_time = datetime.now()
+            duration = end_time - self.recording_start_time
+            end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            self.log_message(f"Recording stopped at {end_ts} (duration {duration})")
+        else:
+            self.log_message("Recording stopped")
+
+        # automatically load the saved recording into the player if it exists
+        if getattr(self, 'last_camera_recording', None):
+            rec_path = Path(self.last_camera_recording)
+            if rec_path.exists():
+                try:
+                    self.load_video_from_path(str(rec_path))
+                    self.log_message(f"Loaded recording {rec_path.name}")
+                except Exception as e:
+                    self.log_message(f"Failed to auto-load recording: {e}")
+            else:
+                self.log_message(f"Recorded file not found: {rec_path}")
+
+        # show brief info to the user
+        if getattr(self, 'last_camera_recording', None):
+            QMessageBox.information(self, "Stopped", f"Recording finished. Duration: {duration}")
 
     def next_frame(self):
         if self.cap and self.cap.isOpened():

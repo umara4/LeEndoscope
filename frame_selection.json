@@ -1049,6 +1049,92 @@
       },
       "Seg2_frame_output": {},
       "Seg3_frame_output": {}
+    },
+    "c:\\Users\\bgdiv\\OneDrive\\Documents\\McMaster_University\\5th_Year\\IBEHS_5P06\\Code\\LeEndoscope\\GUI\\recordings\\camera_recording_1_20260109_154007.mp4": {
+      "Seg1_frame_output": {
+        "frame_00000.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00001.jpg": {
+          "checked": false,
+          "modified": true
+        },
+        "frame_00002.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00003.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00004.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00005.jpg": {
+          "checked": false,
+          "modified": true
+        },
+        "frame_00006.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00007.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00008.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00009.jpg": {
+          "checked": true,
+          "modified": false
+        }
+      },
+      "Seg2_frame_output": {
+        "frame_00000.jpg": {
+          "checked": false,
+          "modified": true
+        },
+        "frame_00001.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00002.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00003.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00004.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00005.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00006.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00007.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00008.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00009.jpg": {
+          "checked": true,
+          "modified": false
+        }
+      }
     }
   }
 }

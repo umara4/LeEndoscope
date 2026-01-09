@@ -1,0 +1,4 @@
+{
+    "chat.edits2.enabled": false,
+    "github.copilot.chat.languageContext.inline.typescript.enabled": true
+}
