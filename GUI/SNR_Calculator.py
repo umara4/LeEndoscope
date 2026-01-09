@@ -1,8 +1,13 @@
 import numpy as np
 import cv2
+import os
 
 snr_threshold = 25
 sharpness_threshold = 100
+brightness_threshold = 220
+saturation_threshold = 40
+specular_threshold = 0.05
+
 
 def calculate_SNR(frame):
 
@@ -26,6 +31,16 @@ def calculate_sharpness(frame):
 
     return lapacian_variance
 
+def calculate_specular(frame):
+    hsv = cv2.cvtcolor(frame, cv2.COLOR_BGR2HSV)
+
+    h, s, v = cv2.split(hsv)
+
+    specular_mask = np.logical_and(v > brightness_threshold, s < saturation_threshold)
+    specular_ratio = np.sum(specular_mask) / specular_mask.size
+
+    return specular_ratio
+
 def eval_frames(output_folder, snr_threshold, sharpness_threshold):
 
     #Initialize empty arrays for selected and rejected frames based on SNR and sharpness
@@ -41,15 +56,15 @@ def eval_frames(output_folder, snr_threshold, sharpness_threshold):
 
             snr = calculate_SNR(frame)
             sharpness = calculate_sharpness(frame)
+            specular = calculate_specular(frame)
 
-            if snr >= snr_threshold and sharpness >= sharpness_threshold:
+            if snr >= snr_threshold and sharpness >= sharpness_threshold and specular <= specular_threshold:
                 selected_frames.append((filename, snr, sharpness))
 
             else:
                 rejected_frames.append((filename, snr, sharpness))
 
     return selected_frames, rejected_frames 
-
 
 
 
