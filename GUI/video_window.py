@@ -111,12 +111,27 @@ class VideoWindow(QWidget):
             return
 
         h, w = frame.shape[:2]
-        fps = self.capture.get(cv2.CAP_PROP_FPS) or 20.0
+        # Get actual FPS from camera
+        fps = self.capture.get(cv2.CAP_PROP_FPS)
+        if not fps or fps < 1:
+            fps = 30.0
+
+        # Create recording directory if it doesn't exist
+        recordings_dir = Path(__file__).parent.parent / "Recordings"
+        recordings_dir.mkdir(exist_ok=True)
+
+        # Create output file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = recordings_dir / f"recording_{self.selected_camera_idx}_{timestamp}.mp4"
+
+        # Setup video writer
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-        if not self.writer.isOpened():
+        self.recording_writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        if not self.recording_writer.isOpened():
+            self.recording_writer = None
             QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
-            self.writer = None
+            self.capture.release()
+            return
 
         self.recording = True
         self.stop_btn.setEnabled(True)
@@ -206,11 +221,19 @@ if __name__ == "__main__":
 import os
 import cv2
 import numpy as np
+import time
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError:
+    serial = None
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFrame, QFileDialog,
     QProgressBar, QMessageBox, QTimeEdit, QLineEdit,
-    QListWidget, QListWidgetItem, QMenu, QInputDialog, QTextEdit
+    QListWidget, QListWidgetItem, QMenu, QInputDialog, QTextEdit,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QIcon
@@ -399,50 +422,75 @@ class VideoWindow(QMainWindow):
         self.load_button.clicked.connect(self.load_video_file)
         side_layout.addWidget(self.load_button)
 
-        # Collapsible Start Camera section
-        self.camera_panel_collapsed = True
-        self.camera_button = QPushButton("Start Camera")
-        self.camera_button.setFixedHeight(40)
-        self.camera_button.clicked.connect(self.toggle_camera_panel)
-        side_layout.addWidget(self.camera_button)
+        # Collapsible Setup System section
+        self.setup_system_collapsed = True
+        self.setup_system_button = QPushButton("Setup System")
+        self.setup_system_button.setFixedHeight(40)
+        self.setup_system_button.clicked.connect(self.toggle_setup_system)
+        side_layout.addWidget(self.setup_system_button)
 
-        # Camera content (hidden by default)
-        self.camera_content = QWidget()
-        cam_layout = QVBoxLayout(self.camera_content)
-        cam_layout.setContentsMargins(5, 5, 5, 5)
-        cam_layout.setSpacing(6)
+        # Setup System content (hidden by default)
+        self.setup_system_content = QWidget()
+        setup_layout = QVBoxLayout(self.setup_system_content)
+        setup_layout.setContentsMargins(5, 5, 5, 5)
+        setup_layout.setSpacing(6)
 
-        self.camera_combo = QComboBox()
-        cams = []
-        try:
-            cams = probe_cameras()
-        except Exception:
-            pass
-        if not cams:
-            self.camera_combo.addItem("No cameras found", -1)
-        else:
-            for c in cams:
-                self.camera_combo.addItem(f"Camera {c}", c)
-        # auto-refresh when selection changes
-        self.camera_combo.currentIndexChanged.connect(self.on_camera_selected)
+        # Camera dropdown
+        camera_label = QLabel("Select Camera:")
+        camera_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        self.setup_camera_combo = QComboBox()
+        setup_layout.addWidget(camera_label)
+        setup_layout.addWidget(self.setup_camera_combo)
 
-        # Recording controls inside collapsible area
+        # COM port dropdown
+        com_label = QLabel("Select COM Port:")
+        com_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        self.setup_comport_combo = QComboBox()
+        setup_layout.addWidget(com_label)
+        setup_layout.addWidget(self.setup_comport_combo)
+
+        # Refresh and Save buttons
+        button_layout = QHBoxLayout()
+        self.setup_refresh_button = QPushButton("Refresh")
+        self.setup_refresh_button.clicked.connect(self.refresh_setup_dropdowns)
+        self.setup_save_button = QPushButton("Save Setup")
+        self.setup_save_button.clicked.connect(self.save_setup_and_start_camera)
+        button_layout.addWidget(self.setup_refresh_button)
+        button_layout.addWidget(self.setup_save_button)
+        setup_layout.addLayout(button_layout)
+
+        self.setup_system_content.setVisible(False)
+        side_layout.addWidget(self.setup_system_content)
+
+        # Collapsible Recording section
+        self.recording_collapsed = True
+        self.recording_button = QPushButton("Recording")
+        self.recording_button.setFixedHeight(40)
+        self.recording_button.clicked.connect(self.toggle_recording_panel)
+        side_layout.addWidget(self.recording_button)
+
+        # Recording content (hidden by default)
+        self.recording_content = QWidget()
+        recording_layout = QVBoxLayout(self.recording_content)
+        recording_layout.setContentsMargins(5, 5, 5, 5)
+        recording_layout.setSpacing(6)
+
+        # Recording controls
         btn_layout = QHBoxLayout()
         self.start_record_btn = QPushButton("Start Recording")
-        self.start_record_btn.clicked.connect(self.start_camera_recording)
-        self.start_record_btn.setEnabled(False)
+        self.start_record_btn.clicked.connect(self.start_recording)
+        self.start_record_btn.setEnabled(True)
 
-        self.stop_record_btn = QPushButton("Stop Recording")
-        self.stop_record_btn.clicked.connect(self.stop_camera_recording)
+        self.stop_record_btn = QPushButton("End Recording")
+        self.stop_record_btn.clicked.connect(self.stop_recording)
         self.stop_record_btn.setEnabled(False)
 
         btn_layout.addWidget(self.start_record_btn)
         btn_layout.addWidget(self.stop_record_btn)
+        recording_layout.addLayout(btn_layout)
 
-        cam_layout.addWidget(self.camera_combo)
-        cam_layout.addLayout(btn_layout)
-        self.camera_content.setVisible(False)
-        side_layout.addWidget(self.camera_content)
+        self.recording_content.setVisible(False)
+        side_layout.addWidget(self.recording_content)
 
         # Collapsible Segments section
         self.segments_collapsed = True
@@ -614,6 +662,15 @@ class VideoWindow(QMainWindow):
         self.completed_segments = 0
         self.current_video_id = None
         self.selected_frames = {}
+        
+        # Setup System state
+        self.selected_camera_idx = None
+        self.selected_com_port = None
+
+        # Recording state
+        self.is_recording = False
+        self.recording_writer = None
+        self.recording_file_path = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
@@ -634,6 +691,10 @@ class VideoWindow(QMainWindow):
             }
         """
         self.timeline_slider.setStyleSheet(self.slider_base_style)
+
+        # Disable recording and segments on startup
+        self.set_recording_enabled(False)
+        self.set_segments_enabled(False)
 
     def pause_video(self):
         if self.timer.isActive():
@@ -772,7 +833,10 @@ class VideoWindow(QMainWindow):
         self.current_video_id = os.path.abspath(file_name)
         self.cap = cv2.VideoCapture(file_name)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
+        fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+        if not fps or fps < 1:
+            fps = 30.0
+        self.fps = fps
         self.current_frame = 0
         # Reset any previous frame selections when a new video is loaded
         self.selected_frames = {}
@@ -783,7 +847,7 @@ class VideoWindow(QMainWindow):
         self.segment_list.clear()
         self.segments = []
 
-        duration_seconds = self.total_frames // max(1, self.fps)
+        duration_seconds = int(self.total_frames / max(1.0, self.fps))
         self.total_time_label.setText(self.seconds_to_time(duration_seconds))
         self.refresh_timeline_highlight()
 
@@ -798,6 +862,17 @@ class VideoWindow(QMainWindow):
         if ret:
             self.update_preview(frame)
             self.current_time_label.setText("00:00:00")
+
+        # Segments should be usable after loading a video
+        self.set_segments_enabled(True)
+
+        # Ensure video is paused at the beginning; user presses Play
+        if self.timer.isActive():
+            self.timer.stop()
+        try:
+            self.play_pause_button.setText("▶")
+        except Exception:
+            pass
 
     def add_segment(self):
         name = self.segment_name_input.text().strip() or f"Segment {len(self.segments)+1}"
@@ -915,7 +990,6 @@ class VideoWindow(QMainWindow):
     
     def log_message(self, message):
         """Add timestamped message to terminal"""
-        from datetime import datetime
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         full_message = f"[{timestamp}] {message}"
         self.terminal_display.append(full_message)
@@ -946,7 +1020,7 @@ class VideoWindow(QMainWindow):
         """Adjust segment list height based on number of items"""
         count = self.segment_list.count()
         if count == 0:
-            # Minimum height for at least 1 item space
+            # Minimum height for at least 1 item
             item_height = 40
         else:
             # Calculate height based on actual items
@@ -1074,161 +1148,316 @@ class VideoWindow(QMainWindow):
         pixmap = QPixmap.fromImage(qt_image).scaled(self.viewer_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
         self.viewer_label.setPixmap(pixmap)
 
-    # --- Camera capture methods (collapsible panel) ---
-    def toggle_camera_panel(self):
-        self.camera_panel_collapsed = not self.camera_panel_collapsed
-        self.camera_content.setVisible(not self.camera_panel_collapsed)
-        if self.camera_panel_collapsed:
-            self.camera_button.setText("Start Camera")
+    # --- Setup System methods (collapsible panel) ---
+    def toggle_setup_system(self):
+        """Toggle the Setup System section visibility"""
+        self.setup_system_collapsed = not self.setup_system_collapsed
+        self.setup_system_content.setVisible(not self.setup_system_collapsed)
+        if self.setup_system_collapsed:
+            self.setup_system_button.setText("Setup System")
         else:
-            self.camera_button.setText("Start Camera ▼")
-            # ensure camera list is up to date when expanded
-            try:
-                cams = probe_cameras()
-            except Exception:
-                cams = []
-            self.camera_combo.clear()
-            if not cams:
-                self.camera_combo.addItem("No cameras found", -1)
-            else:
-                for c in cams:
-                    self.camera_combo.addItem(f"Camera {c}", c)
+            self.setup_system_button.setText("Setup System ▼")
 
-    def on_camera_selected(self, index):
-        idx = self.camera_combo.itemData(index)
-        if idx is None or idx == -1:
+    def get_available_cameras(self):
+        """Get list of available cameras"""
+        cams = []
+        try:
+            cams = probe_cameras()
+        except Exception:
+            pass
+        return cams
+
+    def get_available_comports(self):
+        """Get list of available COM ports"""
+        if serial is None:
+            return []
+        
+        try:
+            ports = list(serial.tools.list_ports.comports())
+            return [(p.device, p.description) for p in ports]
+        except Exception:
+            return []
+
+    def refresh_setup_dropdowns(self):
+        """Refresh both camera and COM port dropdowns"""
+        # Refresh cameras
+        self.setup_camera_combo.clear()
+        cams = self.get_available_cameras()
+        if not cams:
+            self.setup_camera_combo.addItem("No cameras found", -1)
+        else:
+            for c in cams:
+                self.setup_camera_combo.addItem(f"Camera {c}", c)
+
+        # Refresh COM ports
+        self.setup_comport_combo.clear()
+        ports = self.get_available_comports()
+        if not ports:
+            self.setup_comport_combo.addItem("No COM ports found", None)
+        else:
+            for port, desc in ports:
+                display_text = f"{port} - {desc}" if desc else port
+                self.setup_comport_combo.addItem(display_text, port)
+
+    def save_setup_and_start_camera(self):
+        """Save the selected setup and start showing live camera output"""
+        # Get selected camera
+        camera_idx = self.setup_camera_combo.currentData()
+        if camera_idx is None or camera_idx == -1:
+            QMessageBox.warning(self, "No Camera Selected", "Please select a valid camera.")
             return
-        # stop any existing camera preview
-        if getattr(self, 'cam_timer', None) and self.cam_timer.isActive():
-            self.cam_timer.stop()
-        if getattr(self, 'cam_capture', None):
-            try:
-                self.cam_capture.release()
-            except Exception:
-                pass
-            self.cam_capture = None
 
-        # open new camera for preview (not recording)
-        self.cam_capture = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        if not self.cam_capture or not self.cam_capture.isOpened():
-            QMessageBox.warning(self, "Camera", f"Unable to open camera {idx}")
+        # Get selected COM port
+        com_port = self.setup_comport_combo.currentData()
+        if com_port is None:
+            QMessageBox.warning(self, "No COM Port Selected", "Please select a valid COM port.")
             return
 
-        # enable start recording button now that preview is available
-        self.start_record_btn.setEnabled(True)
-        self.stop_record_btn.setEnabled(False)
+        # Store the setup
+        self.selected_camera_idx = camera_idx
+        self.selected_com_port = com_port
 
-        # start preview timer
-        fps = self.cam_capture.get(cv2.CAP_PROP_FPS) or 20.0
-        self.cam_timer = QTimer(self)
-        self.cam_timer.timeout.connect(self._update_camera_frame)
-        self.cam_timer.start(int(1000 / max(1, fps)))
+        # Log the selection
+        self.log_message(f"Setup Saved: Camera {camera_idx} and COM PORT {com_port}")
 
-        self.cam_recording = False
-        self.cam_writer = None
-        self.last_camera_recording = None
-        self.recording_start_time = None
-        self.log_message(f"Camera switched to Camera {idx}")
+        # Enable Recording widget
+        self.set_recording_enabled(True)
 
-    def _update_camera_frame(self):
-        if not getattr(self, 'cam_capture', None):
+        # Start live camera preview
+        self.start_live_preview(camera_idx)
+
+    def start_live_preview(self, camera_idx):
+        """Start live camera preview and display in video viewer"""
+        try:
+            # Release previous capture if any
+            if self.cap:
+                self.cap.release()
+
+            # Open the selected camera
+            self.cap = cv2.VideoCapture(camera_idx, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                QMessageBox.critical(self, "Camera Error", f"Cannot open camera {camera_idx}")
+                return
+
+            # Set camera properties for better quality
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+
+            # Update viewer label
+            self.viewer_label.setText("Live Camera Preview")
+
+            # Start a timer to continuously update the preview
+            if not hasattr(self, '_live_preview_timer'):
+                self._live_preview_timer = QTimer()
+                self._live_preview_timer.timeout.connect(self._update_live_preview)
+            
+            self._live_preview_timer.start(30)  # Update every 30ms (~33 FPS)
+            self.log_message(f"Started live preview from camera {camera_idx}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start live preview: {str(e)}")
+            self.log_message(f"Error starting live preview: {str(e)}")
+
+    def _update_live_preview(self):
+        """Update the live preview frame"""
+        if not hasattr(self, 'cap') or self.cap is None or not self.cap.isOpened():
+            if hasattr(self, '_live_preview_timer'):
+                self._live_preview_timer.stop()
             return
-        ret, frame = self.cam_capture.read()
+
+        ret, frame = self.cap.read()
+        if ret:
+            self.update_preview(frame)
+        else:
+            if hasattr(self, '_live_preview_timer'):
+                self._live_preview_timer.stop()
+
+    # --- Recording methods (collapsible panel) ---
+    def toggle_recording_panel(self):
+        """Toggle the Recording section visibility"""
+        self.recording_collapsed = not self.recording_collapsed
+        self.recording_content.setVisible(not self.recording_collapsed)
+        if self.recording_collapsed:
+            self.recording_button.setText("Recording")
+        else:
+            self.recording_button.setText("Recording ▼")
+
+    def start_recording(self):
+        """Start recording from the selected camera.
+
+        Implementation guarantees that real-world duration matches recorded duration
+        by writing frames at a fixed output FPS (independent of camera-reported FPS).
+        """
+        if getattr(self, 'is_recording', False):
+            return
+
+        if getattr(self, 'selected_camera_idx', None) is None:
+            QMessageBox.warning(self, "No Camera", "Please setup a camera first using the Setup System.")
+            return
+
+        # Stop playback if a video is currently loaded/playing
+        try:
+            if self.timer.isActive():
+                self.timer.stop()
+            self.play_pause_button.setText("▶")
+        except Exception:
+            pass
+
+        # Stop any live-preview timer (recording loop provides preview)
+        try:
+            if hasattr(self, '_live_preview_timer') and self._live_preview_timer.isActive():
+                self._live_preview_timer.stop()
+        except Exception:
+            pass
+
+        # Clean up any existing capture
+        try:
+            if self.cap:
+                self.cap.release()
+        except Exception:
+            pass
+
+        cap = cv2.VideoCapture(self.selected_camera_idx, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            QMessageBox.critical(self, "Camera Error", f"Cannot open camera {self.selected_camera_idx}")
+            return
+
+        # Read first frame immediately (starts the recording "now")
+        ret, frame = cap.read()
         if not ret:
-            return
-        # show preview
-        self.update_preview(frame)
-        # record if active
-        if getattr(self, 'cam_recording', False) and getattr(self, 'cam_writer', None):
-            try:
-                self.cam_writer.write(frame)
-            except Exception:
-                pass
-
-    def start_camera_recording(self):
-        if not getattr(self, 'cam_capture', None) or not self.cam_capture.isOpened():
-            QMessageBox.warning(self, "No Preview", "Start camera preview before recording.")
-            return
-        # prepare writer
-        idx = None
-        # try to find selected camera index
-        cur = self.camera_combo.currentIndex()
-        idx = self.camera_combo.itemData(cur)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = RECORDINGS_DIR / f"camera_recording_{idx}_{timestamp}.mp4"
-        # grab a frame to get size
-        ret, frame = self.cam_capture.read()
-        if not ret:
+            cap.release()
             QMessageBox.warning(self, "Error", "Unable to read frame to start recording.")
             return
-        h, w = frame.shape[:2]
-        fps = self.cam_capture.get(cv2.CAP_PROP_FPS) or 20.0
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.cam_writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
-        if not self.cam_writer.isOpened():
-            self.cam_writer = None
-            QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
 
-        self.cam_recording = True
+        h, w = frame.shape[:2]
+
+        # Recordings directory (project-root/Recordings)
+        recordings_dir = Path(__file__).parent.parent / "Recordings"
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = recordings_dir / f"recording_{self.selected_camera_idx}_{timestamp}.mp4"
+
+        # Fixed output FPS to guarantee duration correctness.
+        # Using camera-reported FPS is unreliable on some webcams (can cause 3x speed errors).
+        self._record_out_fps = 30.0
+        self._record_frame_interval = 1.0 / self._record_out_fps
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_path), fourcc, self._record_out_fps, (w, h))
+        if not writer.isOpened():
+            cap.release()
+            QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
+            return
+
+        # Commit state
+        self.cap = cap
+        self.recording_writer = writer
+        self.is_recording = True
         self.recording_start_time = datetime.now()
-        self.last_camera_recording = str(out_path)
+        self.recording_file_path = str(out_path)
+        self._record_latest_frame = frame
+        self._record_next_write_t = time.perf_counter()
+        self._recording_started_logged = False
+
+        # UI
         self.start_record_btn.setEnabled(False)
         self.stop_record_btn.setEnabled(True)
-        ts = self.recording_start_time.strftime("%Y-%m-%d %H:%M:%S")
-        self.log_message(f"Recording started at {ts}")
+        self.start_record_btn.setText("Recording...")
 
-    def stop_camera_recording(self):
-        if not getattr(self, 'cam_recording', False):
+        # Write first frame immediately so the file duration tracks wall-clock.
+        try:
+            self.recording_writer.write(frame)
+            self.update_preview(frame)
+            self.log_message("Recording Started.")
+            self._recording_started_logged = True
+            self._record_next_write_t = time.perf_counter() + self._record_frame_interval
+        except Exception:
+            pass
+
+        # High-frequency timer; we throttle actual writes to _record_out_fps
+        if not hasattr(self, '_record_timer'):
+            self._record_timer = QTimer(self)
+            self._record_timer.timeout.connect(self._record_tick)
+        self._record_timer.start(10)
+
+    def _record_tick(self):
+        if not getattr(self, 'is_recording', False):
             return
-        # stop writer
-        if getattr(self, 'cam_writer', None):
-            try:
-                self.cam_writer.release()
-            except Exception:
-                pass
-            self.cam_writer = None
-        # also stop preview timer and release camera if present
-        if getattr(self, 'cam_timer', None) and self.cam_timer.isActive():
-            try:
-                self.cam_timer.stop()
-            except Exception:
-                pass
-        if getattr(self, 'cam_capture', None):
-            try:
-                self.cam_capture.release()
-            except Exception:
-                pass
-            self.cam_capture = None
+        if not getattr(self, 'cap', None) or not self.cap.isOpened():
+            self.stop_recording()
+            return
 
-        self.cam_recording = False
-        self.stop_record_btn.setEnabled(False)
+        # Read the newest frame (live preview)
+        ret, frame = self.cap.read()
+        if ret:
+            self._record_latest_frame = frame
+            try:
+                self.update_preview(frame)
+            except Exception:
+                pass
+
+        # Write frames at fixed output FPS to preserve real duration
+        now = time.perf_counter()
+        loops = 0
+        while now >= getattr(self, '_record_next_write_t', now) and loops < 5:
+            lf = getattr(self, '_record_latest_frame', None)
+            if lf is None:
+                break
+            try:
+                if getattr(self, 'recording_writer', None):
+                    self.recording_writer.write(lf)
+                if not getattr(self, '_recording_started_logged', False):
+                    self.log_message("Recording Started.")
+                    self._recording_started_logged = True
+            except Exception:
+                break
+
+            self._record_next_write_t += getattr(self, '_record_frame_interval', 1.0 / 30.0)
+            loops += 1
+
+    def stop_recording(self):
+        """Stop recording"""
+        if not getattr(self, 'is_recording', False):
+            return
+
+        # Stop record timer
+        if hasattr(self, '_record_timer') and self._record_timer.isActive():
+            try:
+                self._record_timer.stop()
+            except Exception:
+                pass
+
+        # Release writer
+        if getattr(self, 'recording_writer', None):
+            try:
+                self.recording_writer.release()
+            except Exception:
+                pass
+            self.recording_writer = None
+
+        # Release camera
+        if getattr(self, 'cap', None):
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        # Update state
+        self.is_recording = False
         self.start_record_btn.setEnabled(True)
+        self.stop_record_btn.setEnabled(False)
+        self.start_record_btn.setText("Start Recording")
 
-        # compute duration and log concise message
-        duration = None
-        if getattr(self, 'recording_start_time', None):
-            end_time = datetime.now()
-            duration = end_time - self.recording_start_time
-            end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
-            self.log_message(f"Recording stopped at {end_ts} (duration {duration})")
+        # Log
+        self.log_message("Recording Ended.")
+        if hasattr(self, 'recording_file_path'):
+            # Automatically load the new recording for segment creation
+            self.load_video_from_path(self.recording_file_path)
         else:
             self.log_message("Recording stopped")
-
-        # automatically load the saved recording into the player if it exists
-        if getattr(self, 'last_camera_recording', None):
-            rec_path = Path(self.last_camera_recording)
-            if rec_path.exists():
-                try:
-                    self.load_video_from_path(str(rec_path))
-                    self.log_message(f"Loaded recording {rec_path.name}")
-                except Exception as e:
-                    self.log_message(f"Failed to auto-load recording: {e}")
-            else:
-                self.log_message(f"Recorded file not found: {rec_path}")
-
-        # show brief info to the user
-        if getattr(self, 'last_camera_recording', None):
-            QMessageBox.information(self, "Stopped", f"Recording finished. Duration: {duration}")
 
     def next_frame(self):
         if self.cap and self.cap.isOpened():
@@ -1269,4 +1498,19 @@ class VideoWindow(QMainWindow):
             self.current_time_label.setText(self.seconds_to_time(self.current_frame // self.fps))
 
     def seconds_to_time(self, seconds):
-        return QTime(0, 0).addSecs(seconds).toString("HH:mm:ss")
+        return QTime(0, 0).addSecs(int(seconds)).toString("HH:mm:ss")
+
+    def set_recording_enabled(self, enabled: bool):
+        self.recording_button.setEnabled(enabled)
+        self.start_record_btn.setEnabled(enabled)
+        self.stop_record_btn.setEnabled(False if enabled else False)
+        self.recording_content.setEnabled(enabled)
+
+    def set_segments_enabled(self, enabled: bool):
+        self.segments_button.setEnabled(enabled)
+        self.segment_list.setEnabled(enabled)
+        # Optionally collapse the widget if disabled
+        if not enabled:
+            self.segment_list.setVisible(False)
+            self.segments_collapsed = True
+            self.segments_button.setText("Segments")
