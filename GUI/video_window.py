@@ -222,6 +222,8 @@ import os
 import cv2
 import numpy as np
 import time
+import threading
+from typing import Optional
 try:
     import serial
     import serial.tools.list_ports
@@ -314,6 +316,94 @@ class SegmentExtractor(QThread):
         cap.release()
         selected, rejected = self.eval_frames()
         self.finished_parsing.emit(self.name)
+
+
+def _sanitize_filename_component(value: str) -> str:
+    # Windows-safe-ish filename component; keep it minimal.
+    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value).strip(" _")
+
+
+class SerialLogger:
+    def __init__(
+        self,
+        port: str,
+        output_path: Path,
+        baud: int = 115200,
+        timeout: float = 0.5,
+    ) -> None:
+        self.port = port
+        self.output_path = Path(output_path)
+        self.baud = baud
+        self.timeout = timeout
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._ser = None
+        self._fp = None
+        self._lock = threading.Lock()
+        self._t0 = None
+
+    def start(self) -> None:
+        if serial is None:
+            raise RuntimeError("pyserial is not installed")
+        if self._thread and self._thread.is_alive():
+            return
+
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fp = open(self.output_path, "a", encoding="utf-8", newline="\n")
+        self._ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
+        self._stop_event.clear()
+        self._t0 = time.perf_counter()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                raw = self._ser.readline() if self._ser is not None else b""
+            except Exception:
+                continue
+            if not raw:
+                continue
+            try:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            except Exception:
+                line = str(raw).rstrip("\r\n")
+
+            ts = datetime.now().isoformat(timespec="milliseconds")
+            elapsed = 0.0
+            try:
+                if self._t0 is not None:
+                    elapsed = time.perf_counter() - self._t0
+            except Exception:
+                pass
+
+            try:
+                with self._lock:
+                    if self._fp is not None:
+                        self._fp.write(f"{ts}\t{elapsed:.3f}\t{line}\n")
+                        self._fp.flush()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+        try:
+            if self._ser is not None and getattr(self._ser, "is_open", False):
+                self._ser.close()
+        except Exception:
+            pass
+        self._ser = None
+
+        try:
+            if self._fp is not None:
+                self._fp.close()
+        except Exception:
+            pass
+        self._fp = None
 
 class VideoWindow(QMainWindow):
     def __init__(self):
@@ -672,6 +762,10 @@ class VideoWindow(QMainWindow):
         self.recording_writer = None
         self.recording_file_path = None
 
+        # Serial logging (only while recording)
+        self._serial_logger: Optional[SerialLogger] = None
+        self.serial_log_path: Optional[str] = None
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
         self.slider_base_style = """
@@ -701,6 +795,11 @@ class VideoWindow(QMainWindow):
             self.timer.stop()
 
     def closeEvent(self, event):
+        # Ensure serial thread/file handles are stopped
+        try:
+            self._stop_serial_logging()
+        except Exception:
+            pass
         try:
             geo = self.geometry()
             save_geometry((geo.x(), geo.y(), geo.width(), geo.height()))
@@ -1283,6 +1382,46 @@ class VideoWindow(QMainWindow):
         else:
             self.recording_button.setText("Recording ▼")
 
+    def _start_serial_logging(self, out_path: Path) -> None:
+        """Start capturing raw serial output for the selected COM port."""
+        # Only capture when a COM port was saved via Setup System
+        com_port = getattr(self, 'selected_com_port', None)
+        if not com_port:
+            return
+        if serial is None:
+            self.log_message("Serial logging disabled (pyserial not installed).")
+            return
+
+        # If somehow already running, stop and restart
+        try:
+            self._stop_serial_logging()
+        except Exception:
+            pass
+
+        safe_port = _sanitize_filename_component(str(com_port))
+        serial_log_path = out_path.parent / f"{out_path.stem}_serial_{safe_port}.txt"
+
+        try:
+            self._serial_logger = SerialLogger(port=str(com_port), output_path=serial_log_path)
+            self._serial_logger.start()
+            self.serial_log_path = str(serial_log_path)
+            self.log_message(f"Serial logging started on {com_port}")
+        except Exception as e:
+            self._serial_logger = None
+            self.serial_log_path = None
+            self.log_message(f"Serial logging failed to start on {com_port}: {e}")
+
+    def _stop_serial_logging(self) -> None:
+        logger = getattr(self, '_serial_logger', None)
+        if logger is None:
+            return
+        try:
+            logger.stop()
+        finally:
+            self._serial_logger = None
+        if getattr(self, 'serial_log_path', None):
+            self.log_message(f"Serial log saved: {self.serial_log_path}")
+
     def start_recording(self):
         """Start recording from the selected camera.
 
@@ -1361,6 +1500,9 @@ class VideoWindow(QMainWindow):
         self._record_next_write_t = time.perf_counter()
         self._recording_started_logged = False
 
+        # Start serial logging only while recording
+        self._start_serial_logging(out_path)
+
         # UI
         self.start_record_btn.setEnabled(False)
         self.stop_record_btn.setEnabled(True)
@@ -1421,6 +1563,12 @@ class VideoWindow(QMainWindow):
         """Stop recording"""
         if not getattr(self, 'is_recording', False):
             return
+
+        # Stop serial logging first (requested: only between Start/End Recording)
+        try:
+            self._stop_serial_logging()
+        except Exception:
+            pass
 
         # Stop record timer
         if hasattr(self, '_record_timer') and self._record_timer.isActive():

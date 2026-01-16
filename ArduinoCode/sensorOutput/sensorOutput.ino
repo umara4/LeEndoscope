@@ -31,7 +31,7 @@ void setup() {
   bno.setExtCrystalUse(true);
 
   // CSV header
-  Serial.println("t_us,qw,qx,qy,qz,wx,wy,wz");
+  Serial.println("Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z");
 }
 
 void loop() {
