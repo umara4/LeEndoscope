@@ -223,6 +223,7 @@ import cv2
 import numpy as np
 import time
 import threading
+from collections import deque
 from typing import Optional
 try:
     import serial
@@ -238,7 +239,7 @@ from PyQt6.QtWidgets import (
     QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime, QEvent
-from PyQt6.QtGui import QImage, QPixmap, QIcon
+from PyQt6.QtGui import QImage, QPixmap, QIcon, QTextCursor
 from geometry_store import load_geometry, save_geometry, get_start_size
 
 class SegmentExtractor(QThread):
@@ -323,39 +324,97 @@ def _sanitize_filename_component(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value).strip(" _")
 
 
-class SerialLogger:
-    def __init__(
-        self,
-        port: str,
-        output_path: Path,
-        baud: int = 115200,
-        timeout: float = 0.5,
-    ) -> None:
+class SerialPortReader:
+    """Single shared serial reader.
+
+    - Always reads lines into a buffer for UI consumption.
+    - Optionally logs CSV-like lines to a file when enabled.
+    """
+
+    def __init__(self, port: str, baud: int = 115200, timeout: float = 0.5) -> None:
         self.port = port
-        self.output_path = Path(output_path)
         self.baud = baud
         self.timeout = timeout
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._ser = None
-        self._fp = None
-        self._lock = threading.Lock()
-        self._t0 = None
+
+        self._buffer = deque(maxlen=5000)
+        self._buf_lock = threading.Lock()
+
+        self._log_fp = None
+        self._log_lock = threading.Lock()
 
     def start(self) -> None:
         if serial is None:
             raise RuntimeError("pyserial is not installed")
         if self._thread and self._thread.is_alive():
             return
-
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fp = open(self.output_path, "a", encoding="utf-8", newline="\n")
         self._ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
         self._stop_event.clear()
-        self._t0 = time.perf_counter()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def stop(self) -> None:
+        self.disable_logging()
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
+
+        try:
+            if self._ser is not None and getattr(self._ser, "is_open", False):
+                self._ser.close()
+        except Exception:
+            pass
+        self._ser = None
+
+    def enable_logging(self, csv_path: Path, header: str) -> None:
+        csv_path = Path(csv_path)
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._log_lock:
+            self._log_fp = open(csv_path, "w", encoding="utf-8", newline="\n")
+            self._log_fp.write(header.rstrip("\n") + "\n")
+            self._log_fp.flush()
+
+    def disable_logging(self) -> None:
+        with self._log_lock:
+            try:
+                if self._log_fp is not None:
+                    self._log_fp.close()
+            except Exception:
+                pass
+            self._log_fp = None
+
+    def pop_lines(self) -> list[str]:
+        with self._buf_lock:
+            if not self._buffer:
+                return []
+            lines = list(self._buffer)
+            self._buffer.clear()
+            return lines
+
+    def _maybe_log_line(self, line: str) -> None:
+        if not line:
+            return
+        low = line.strip().lower()
+        if low.startswith("timestamp") or low.startswith("t_us"):
+            return
+        if "," not in line:
+            return
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 8:
+            return
+
+        with self._log_lock:
+            if self._log_fp is None:
+                return
+            try:
+                self._log_fp.write(",".join(parts[:8]) + "\n")
+                self._log_fp.flush()
+            except Exception:
+                pass
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -365,45 +424,16 @@ class SerialLogger:
                 continue
             if not raw:
                 continue
+
             try:
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             except Exception:
                 line = str(raw).rstrip("\r\n")
 
-            ts = datetime.now().isoformat(timespec="milliseconds")
-            elapsed = 0.0
-            try:
-                if self._t0 is not None:
-                    elapsed = time.perf_counter() - self._t0
-            except Exception:
-                pass
+            with self._buf_lock:
+                self._buffer.append(line)
 
-            try:
-                with self._lock:
-                    if self._fp is not None:
-                        self._fp.write(f"{ts}\t{elapsed:.3f}\t{line}\n")
-                        self._fp.flush()
-            except Exception:
-                pass
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-
-        try:
-            if self._ser is not None and getattr(self._ser, "is_open", False):
-                self._ser.close()
-        except Exception:
-            pass
-        self._ser = None
-
-        try:
-            if self._fp is not None:
-                self._fp.close()
-        except Exception:
-            pass
-        self._fp = None
+            self._maybe_log_line(line)
 
 class VideoWindow(QMainWindow):
     def __init__(self):
@@ -551,6 +581,12 @@ class VideoWindow(QMainWindow):
 
         self.setup_system_content.setVisible(False)
         side_layout.addWidget(self.setup_system_content)
+
+        # Serial Monitor toggle button (above Recording)
+        self.serial_monitor_button = QPushButton("Serial Monitor")
+        self.serial_monitor_button.setFixedHeight(40)
+        self.serial_monitor_button.clicked.connect(self.toggle_serial_monitor_panel)
+        side_layout.addWidget(self.serial_monitor_button)
 
         # Collapsible Recording section
         self.recording_collapsed = True
@@ -738,6 +774,53 @@ class VideoWindow(QMainWindow):
 
         main_layout.addWidget(side_panel, 1)
         main_layout.addLayout(self.video_layout, 4)
+
+        # Serial Monitor panel on the right (hidden by default)
+        self.serial_monitor_panel = QFrame()
+        self.serial_monitor_panel.setStyleSheet("""
+            QFrame {
+                background-color: #303030;
+                border: 0.5px solid #000000;
+                border-radius: 8px;
+            }
+            QLabel {
+                font-weight: bold;
+                color: #ffffff;
+            }
+            QTextEdit {
+                background-color: #111111;
+                color: #00ff66;
+                border: 1px solid #2a2a2a;
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 12px;
+            }
+        """)
+        sm_layout = QVBoxLayout(self.serial_monitor_panel)
+        sm_layout.setContentsMargins(8, 8, 8, 8)
+        sm_layout.setSpacing(6)
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("Serial Monitor"))
+        header_row.addStretch(1)
+
+        self.serial_monitor_clear_btn = QPushButton("Clear")
+        self.serial_monitor_clear_btn.setFixedHeight(28)
+        self.serial_monitor_clear_btn.clicked.connect(lambda: self.serial_monitor_text.clear())
+        header_row.addWidget(self.serial_monitor_clear_btn)
+
+        self.serial_monitor_autoscroll_btn = QPushButton("Auto-scroll: On")
+        self.serial_monitor_autoscroll_btn.setFixedHeight(28)
+        self.serial_monitor_autoscroll_btn.clicked.connect(self.toggle_serial_monitor_autoscroll)
+        header_row.addWidget(self.serial_monitor_autoscroll_btn)
+
+        sm_layout.addLayout(header_row)
+        self.serial_monitor_text = QTextEdit()
+        self.serial_monitor_text.setReadOnly(True)
+        sm_layout.addWidget(self.serial_monitor_text, 1)
+        self.serial_monitor_panel.setVisible(False)
+        main_layout.addWidget(self.serial_monitor_panel, 2)
+
+        self._serial_monitor_timer = QTimer(self)
+        self._serial_monitor_timer.timeout.connect(self._serial_monitor_tick)
         self.setCentralWidget(central_widget)
 
         # State
@@ -762,9 +845,11 @@ class VideoWindow(QMainWindow):
         self.recording_writer = None
         self.recording_file_path = None
 
-        # Serial logging (only while recording)
-        self._serial_logger: Optional[SerialLogger] = None
-        self.serial_log_path: Optional[str] = None
+        # Serial capture (shared between monitor + CSV logging)
+        self.serial_monitor_visible = False
+        self.serial_monitor_autoscroll = True
+        self._serial_reader: Optional[SerialPortReader] = None
+        self.serial_csv_path: Optional[str] = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
@@ -797,7 +882,7 @@ class VideoWindow(QMainWindow):
     def closeEvent(self, event):
         # Ensure serial thread/file handles are stopped
         try:
-            self._stop_serial_logging()
+            self._stop_serial_capture(stop_reader=True)
         except Exception:
             pass
         try:
@@ -1382,45 +1467,115 @@ class VideoWindow(QMainWindow):
         else:
             self.recording_button.setText("Recording ▼")
 
-    def _start_serial_logging(self, out_path: Path) -> None:
-        """Start capturing raw serial output for the selected COM port."""
-        # Only capture when a COM port was saved via Setup System
+    def toggle_serial_monitor_panel(self):
+        self.serial_monitor_visible = not getattr(self, 'serial_monitor_visible', False)
+        self.serial_monitor_panel.setVisible(self.serial_monitor_visible)
+        self.serial_monitor_button.setText("Serial Monitor ▼" if self.serial_monitor_visible else "Serial Monitor")
+
+        if self.serial_monitor_visible:
+            self._ensure_serial_reader_running()
+            self._serial_monitor_timer.start(50)
+        else:
+            try:
+                self._serial_monitor_timer.stop()
+            except Exception:
+                pass
+            if not getattr(self, 'is_recording', False):
+                self._stop_serial_capture(stop_reader=True)
+
+    def _ensure_serial_reader_running(self) -> None:
         com_port = getattr(self, 'selected_com_port', None)
         if not com_port:
+            self.log_message("No COM port selected. Use Setup System first.")
             return
         if serial is None:
-            self.log_message("Serial logging disabled (pyserial not installed).")
+            self.log_message("Serial features disabled (pyserial not installed).")
             return
 
-        # If somehow already running, stop and restart
+        # Recreate if port changed
+        if self._serial_reader is not None and getattr(self._serial_reader, 'port', None) != str(com_port):
+            try:
+                self._serial_reader.stop()
+            except Exception:
+                pass
+            self._serial_reader = None
+
+        if self._serial_reader is None:
+            try:
+                self._serial_reader = SerialPortReader(port=str(com_port))
+                self._serial_reader.start()
+                self.log_message(f"Serial capture started on {com_port}")
+            except Exception as e:
+                self._serial_reader = None
+                self.log_message(f"Serial capture failed to start on {com_port}: {e}")
+
+    def _serial_monitor_tick(self) -> None:
+        if not getattr(self, 'serial_monitor_visible', False):
+            return
+        reader = getattr(self, '_serial_reader', None)
+        if reader is None:
+            return
         try:
-            self._stop_serial_logging()
+            lines = reader.pop_lines()
+        except Exception:
+            return
+        if not lines:
+            return
+        try:
+            autoscroll = getattr(self, 'serial_monitor_autoscroll', True)
+            vbar = self.serial_monitor_text.verticalScrollBar()
+            prev_scroll = vbar.value()
+
+            self.serial_monitor_text.append("\n".join(lines))
+
+            if autoscroll:
+                self.serial_monitor_text.moveCursor(QTextCursor.MoveOperation.End)
+            else:
+                # Keep the visible region fixed (pause-like), while still appending output.
+                vbar.setValue(prev_scroll)
         except Exception:
             pass
 
-        safe_port = _sanitize_filename_component(str(com_port))
-        serial_log_path = out_path.parent / f"{out_path.stem}_serial_{safe_port}.txt"
+    def toggle_serial_monitor_autoscroll(self):
+        self.serial_monitor_autoscroll = not getattr(self, 'serial_monitor_autoscroll', True)
+        self.serial_monitor_autoscroll_btn.setText(
+            "Auto-scroll: On" if self.serial_monitor_autoscroll else "Auto-scroll: Off"
+        )
 
-        try:
-            self._serial_logger = SerialLogger(port=str(com_port), output_path=serial_log_path)
-            self._serial_logger.start()
-            self.serial_log_path = str(serial_log_path)
-            self.log_message(f"Serial logging started on {com_port}")
-        except Exception as e:
-            self._serial_logger = None
-            self.serial_log_path = None
-            self.log_message(f"Serial logging failed to start on {com_port}: {e}")
-
-    def _stop_serial_logging(self) -> None:
-        logger = getattr(self, '_serial_logger', None)
-        if logger is None:
+    def _start_serial_csv_logging(self, out_video_path: Path) -> None:
+        """Enable CSV logging (only while recording)."""
+        self._ensure_serial_reader_running()
+        if self._serial_reader is None:
             return
+
+        safe_port = _sanitize_filename_component(str(getattr(self, 'selected_com_port', '')))
+        csv_path = out_video_path.parent / f"{out_video_path.stem}_serial_{safe_port}.csv"
+        header = "Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z"
+
         try:
-            logger.stop()
-        finally:
-            self._serial_logger = None
-        if getattr(self, 'serial_log_path', None):
-            self.log_message(f"Serial log saved: {self.serial_log_path}")
+            self._serial_reader.enable_logging(csv_path, header)
+            self.serial_csv_path = str(csv_path)
+            self.log_message(f"Serial CSV logging enabled: {csv_path.name}")
+        except Exception as e:
+            self.serial_csv_path = None
+            self.log_message(f"Failed to enable serial CSV logging: {e}")
+
+    def _stop_serial_capture(self, stop_reader: bool = False) -> None:
+        if self._serial_reader is not None:
+            try:
+                self._serial_reader.disable_logging()
+            except Exception:
+                pass
+            if stop_reader:
+                try:
+                    self._serial_reader.stop()
+                except Exception:
+                    pass
+                self._serial_reader = None
+
+        if getattr(self, 'serial_csv_path', None):
+            self.log_message(f"Serial CSV saved: {self.serial_csv_path}")
+        self.serial_csv_path = None
 
     def start_recording(self):
         """Start recording from the selected camera.
@@ -1500,8 +1655,8 @@ class VideoWindow(QMainWindow):
         self._record_next_write_t = time.perf_counter()
         self._recording_started_logged = False
 
-        # Start serial logging only while recording
-        self._start_serial_logging(out_path)
+        # Start serial CSV logging only while recording
+        self._start_serial_csv_logging(out_path)
 
         # UI
         self.start_record_btn.setEnabled(False)
@@ -1566,7 +1721,7 @@ class VideoWindow(QMainWindow):
 
         # Stop serial logging first (requested: only between Start/End Recording)
         try:
-            self._stop_serial_logging()
+            self._stop_serial_capture(stop_reader=not getattr(self, 'serial_monitor_visible', False))
         except Exception:
             pass
 

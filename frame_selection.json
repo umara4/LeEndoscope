@@ -1135,6 +1135,18 @@
           "modified": false
         }
       }
+    },
+    "c:\\Users\\bgdiv\\OneDrive\\Documents\\McMaster_University\\5th_Year\\IBEHS_5P06\\Code\\LeEndoscope\\Recordings\\recording_1_20260116_191515.mp4": {
+      "Segment1_frame_output": {
+        "frame_00000.jpg": {
+          "checked": true,
+          "modified": false
+        },
+        "frame_00001.jpg": {
+          "checked": true,
+          "modified": true
+        }
+      }
     }
   }
 }
