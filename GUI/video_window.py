@@ -1,6 +1,7 @@
 """
 Video capture window: select camera, start live preview+recording, stop, export frames.
 """
+from typing import List
 from pathlib import Path
 import cv2
 from datetime import datetime
