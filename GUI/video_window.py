@@ -4,7 +4,7 @@ Video capture window: select camera, start live preview+recording, stop, export 
 from pathlib import Path
 import cv2
 from datetime import datetime
-
+from typing import List
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -387,7 +387,7 @@ class SerialPortReader:
                 pass
             self._log_fp = None
 
-    def pop_lines(self) -> list[str]:
+    def pop_lines(self) -> List[str]:
         with self._buf_lock:
             if not self._buffer:
                 return []
