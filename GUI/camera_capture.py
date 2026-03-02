@@ -4,11 +4,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 import cv2
 import os
 import time
+import csv
 
 class CameraCaptureWidget(QtWidgets.QWidget):
     def __init__(self, parent=None, max_test_idx=8, recordings_dir=None):
         super().__init__(parent)
-        self.recordings_dir = recordings_dir or os.path.join(os.path.dirname(__file__), "recordings")
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        self.recordings_dir = recordings_dir or os.path.join(project_root, "Data")
         os.makedirs(self.recordings_dir, exist_ok=True)
 
         # UI
@@ -158,14 +160,55 @@ class CameraCaptureWidget(QtWidgets.QWidget):
     def extract_frames(video_path, out_dir, prefix="frame"):
         os.makedirs(out_dir, exist_ok=True)
         cap = cv2.VideoCapture(video_path)
+        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        data_dir = os.path.join(project_root, "Data")
+        try:
+            if os.path.commonpath([os.path.abspath(out_dir), os.path.abspath(data_dir)]) == os.path.abspath(data_dir):
+                timestamps_path = os.path.join(data_dir, "FrameTimestamp.csv")
+            else:
+                timestamps_path = os.path.join(out_dir, f"{prefix}_timestamps.csv")
+        except Exception:
+            timestamps_path = os.path.join(out_dir, f"{prefix}_timestamps.csv")
+
+        csv_fp = open(timestamps_path, "w", encoding="utf-8", newline="")
+        csv_writer = csv.writer(csv_fp)
+        csv_writer.writerow([
+            "segment_name",
+            "frame_name",
+            "video_frame_index",
+            "timestamp_ms",
+            "timestamp_s",
+        ])
         idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            fname = os.path.join(out_dir, f"{prefix}_{idx:06d}.png")
-            cv2.imwrite(fname, frame)
-            idx += 1
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_name = f"{prefix}_{idx:06d}.png"
+                fname = os.path.join(out_dir, frame_name)
+                cv2.imwrite(fname, frame)
+
+                pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if (not pos_msec or pos_msec <= 0) and video_fps > 0:
+                    pos_msec = (idx * 1000.0) / video_fps
+                timestamp_s = (pos_msec / 1000.0) if pos_msec is not None else ""
+                csv_writer.writerow([
+                    "",
+                    frame_name,
+                    idx,
+                    f"{pos_msec:.3f}" if pos_msec is not None else "",
+                    f"{timestamp_s:.6f}" if timestamp_s != "" else "",
+                ])
+
+                idx += 1
+        finally:
+            try:
+                csv_fp.close()
+            except Exception:
+                pass
         cap.release()
         return idx
 

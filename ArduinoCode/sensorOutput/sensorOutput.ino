@@ -10,6 +10,18 @@ static const uint32_t LOG_PERIOD_US = 1000000UL / LOG_HZ;
 
 uint32_t last_us = 0;
 
+// Simple line-based command buffer for host sync.
+String cmd_buf;
+
+static void handle_command(const String& cmd) {
+  if (cmd.length() == 0) return;
+  if (cmd == "SYNC") {
+    // Respond with the same timebase used in the CSV stream (micros).
+    Serial.print("SYNC,");
+    Serial.println((uint32_t)micros());
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
@@ -35,6 +47,22 @@ void setup() {
 }
 
 void loop() {
+  // Non-blocking command processing (e.g., SYNC)
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cmd_buf.length() > 0) {
+        handle_command(cmd_buf);
+        cmd_buf = "";
+      }
+    } else {
+      // Guard against runaway input
+      if (cmd_buf.length() < 64) {
+        cmd_buf += c;
+      }
+    }
+  }
+
   uint32_t now = micros();
   if ((uint32_t)(now - last_us) < LOG_PERIOD_US) return;
   last_us = now;

@@ -12,8 +12,12 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox
 )
 
-RECORDINGS_DIR = Path(__file__).parent / "recordings"
-RECORDINGS_DIR.mkdir(exist_ok=True)
+PROJECT_ROOT = Path(__file__).parent.parent
+DATA_DIR = PROJECT_ROOT / "Data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Legacy/simple recorder UI writes to Data/ as well.
+RECORDINGS_DIR = DATA_DIR
 
 def probe_cameras(max_probe=6, timeout_ms=200):
     available = []
@@ -101,8 +105,7 @@ class VideoWindow(QWidget):
             return
 
         # prepare writer (start recording immediately)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = RECORDINGS_DIR / f"recording_{idx}_{timestamp}.mp4"
+        out_path = DATA_DIR / "Recording.mp4"
         ret, frame = self.capture.read()
         if not ret:
             QMessageBox.critical(self, "Error", "Failed to read from camera.")
@@ -116,13 +119,12 @@ class VideoWindow(QWidget):
         if not fps or fps < 1:
             fps = 30.0
 
-        # Create recording directory if it doesn't exist
-        recordings_dir = Path(__file__).parent.parent / "Recordings"
-        recordings_dir.mkdir(exist_ok=True)
+        # Create data directory if it doesn't exist
+        recordings_dir = DATA_DIR
+        recordings_dir.mkdir(parents=True, exist_ok=True)
 
         # Create output file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = recordings_dir / f"recording_{self.selected_camera_idx}_{timestamp}.mp4"
+        out_path = recordings_dir / "Recording.mp4"
 
         # Setup video writer
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -178,13 +180,13 @@ class VideoWindow(QWidget):
         self.start_btn.setEnabled(True)
         self.export_frames_btn.setEnabled(True)
         self.segment_btn.setEnabled(True)
-        QMessageBox.information(self, "Stopped", "Recording stopped and saved to recordings/")
+        QMessageBox.information(self, "Stopped", "Recording stopped and saved to Data/")
 
     def export_frames(self):
-        rec_file, _ = QFileDialog.getOpenFileName(self, "Select recording to export frames", str(RECORDINGS_DIR), "Video Files (*.mp4 *.avi)")
+        rec_file, _ = QFileDialog.getOpenFileName(self, "Select recording to export frames", str(DATA_DIR), "Video Files (*.mp4 *.avi)")
         if not rec_file:
             return
-        out_dir = QFileDialog.getExistingDirectory(self, "Choose output folder for frames", str(RECORDINGS_DIR))
+        out_dir = QFileDialog.getExistingDirectory(self, "Choose output folder for frames", str(DATA_DIR))
         if not out_dir:
             return
         self._extract_frames(str(rec_file), Path(out_dir))
@@ -194,18 +196,54 @@ class VideoWindow(QWidget):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         cap = cv2.VideoCapture(video_path)
+        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         idx = 0
         saved = 0
+
+        # Match requested structure: Data/FrameTimestamp.csv (outside Segments)
+        try:
+            out_dir.relative_to(DATA_DIR)
+            timestamps_path = DATA_DIR / "FrameTimestamp.csv"
+        except Exception:
+            timestamps_path = out_dir / "frame_timestamps.csv"
+
+        csv_fp = open(timestamps_path, "w", encoding="utf-8", newline="")
+        csv_writer = csv.writer(csv_fp)
+        csv_writer.writerow([
+            "segment_name",
+            "frame_name",
+            "video_frame_index",
+            "timestamp_ms",
+            "timestamp_s",
+        ])
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             if idx % step == 0:
-                fname = out_dir / f"frame_{idx:06d}.png"
+                frame_name = f"frame_{idx:06d}.png"
+                fname = out_dir / frame_name
                 cv2.imwrite(str(fname), frame)
+
+                pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if (not pos_msec or pos_msec <= 0) and video_fps > 0:
+                    pos_msec = (idx * 1000.0) / video_fps
+                timestamp_s = (pos_msec / 1000.0) if pos_msec is not None else ""
+                csv_writer.writerow([
+                    "",
+                    frame_name,
+                    idx,
+                    f"{pos_msec:.3f}" if pos_msec is not None else "",
+                    f"{timestamp_s:.6f}" if timestamp_s != "" else "",
+                ])
+
                 saved += 1
             idx += 1
         cap.release()
+        try:
+            csv_fp.close()
+        except Exception:
+            pass
         return saved
 
     def run_segmentation(self):
@@ -223,6 +261,7 @@ import cv2
 import numpy as np
 import time
 import threading
+import csv
 from collections import deque
 from typing import Optional
 try:
@@ -246,10 +285,18 @@ class SegmentExtractor(QThread):
     progress = pyqtSignal(tuple)  # (segment_name, progress_value)
     finished_parsing = pyqtSignal(str)  # emits segment name when done
 
-    def __init__(self, video_path, output_folder, start_frame, end_frame, fps=2, name=""):
+    def __init__(
+        self,
+        video_path,
+        frames_output_folder,
+        start_frame,
+        end_frame,
+        fps=2,
+        name="",
+    ):
         super().__init__()
         self.video_path = video_path
-        self.output_folder = output_folder
+        self.output_folder = frames_output_folder
         self.start_frame = start_frame
         self.end_frame = end_frame
         self.fps = fps
@@ -293,26 +340,60 @@ class SegmentExtractor(QThread):
 
     def run(self):
         os.makedirs(self.output_folder, exist_ok=True)
+
+        # Per-segment frame timestamps (absolute ms)
+        ts_path = Path(self.output_folder) / "FrameTimeStamp.csv"
+        csv_fp = None
+        csv_writer = None
+        try:
+            csv_fp = open(ts_path, "w", encoding="utf-8", newline="")
+            csv_writer = csv.writer(csv_fp)
+            csv_writer.writerow(["frame_name", "timestamp_ms"])
+        except Exception:
+            csv_fp = None
+            csv_writer = None
+
         cap = cv2.VideoCapture(self.video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
 
-        interval = max(1, int(cap.get(cv2.CAP_PROP_FPS) // self.fps)) if self.fps > 0 else 1
+        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        interval = max(1, int(video_fps // self.fps)) if self.fps > 0 and video_fps > 0 else 1
         frame_count, saved_count = self.start_frame, 0
 
-        while frame_count < self.end_frame:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            while frame_count < self.end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            if frame_count % interval == 0:
-                filename = os.path.join(self.output_folder, f"frame_{saved_count:05d}.jpg")
-                cv2.imwrite(filename, frame)
-                saved_count += 1
+                if frame_count % interval == 0:
+                    frame_name = f"Frame{saved_count + 1}.png"
+                    filename = os.path.join(self.output_folder, frame_name)
+                    cv2.imwrite(filename, frame)
 
-            progress_val = int(((frame_count - self.start_frame) / (self.end_frame - self.start_frame)) * 100)
-            self.progress.emit((self.name, progress_val))
+                    pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    if (not pos_msec or pos_msec <= 0) and video_fps > 0:
+                        pos_msec = (frame_count * 1000.0) / video_fps
 
-            frame_count += 1
+                    if csv_writer is not None:
+                        try:
+                            ts_ms = int(round(float(pos_msec))) if pos_msec is not None else 0
+                        except Exception:
+                            ts_ms = 0
+                        csv_writer.writerow([frame_name, ts_ms])
+
+                    saved_count += 1
+
+                progress_val = int(((frame_count - self.start_frame) / (self.end_frame - self.start_frame)) * 100)
+                self.progress.emit((self.name, progress_val))
+
+                frame_count += 1
+        finally:
+            try:
+                if csv_fp is not None:
+                    csv_fp.close()
+            except Exception:
+                pass
 
         cap.release()
         selected, rejected = self.eval_frames()
@@ -345,6 +426,35 @@ class SerialPortReader:
 
         self._log_fp = None
         self._log_lock = threading.Lock()
+
+        # Time sync (Arduino micros -> host perf_counter micros -> recording-relative ms)
+        self._sync_offset_us: Optional[float] = None
+        self._record_start_host_us: Optional[float] = None
+
+    def set_time_sync(self, sync_offset_us: Optional[float], record_start_host_us: Optional[float]) -> None:
+        # sync_offset_us maps: host_us ~= arduino_us + sync_offset_us
+        self._sync_offset_us = sync_offset_us
+        self._record_start_host_us = record_start_host_us
+
+    def flush_input(self) -> None:
+        # Clear both pyserial RX buffer and in-memory buffer.
+        try:
+            if self._ser is not None:
+                self._ser.reset_input_buffer()
+        except Exception:
+            pass
+        with self._buf_lock:
+            self._buffer.clear()
+
+    def send_line(self, text: str) -> None:
+        try:
+            if self._ser is None:
+                return
+            payload = (text.rstrip("\r\n") + "\n").encode("utf-8", errors="ignore")
+            self._ser.write(payload)
+            self._ser.flush()
+        except Exception:
+            pass
 
     def start(self) -> None:
         if serial is None:
@@ -407,6 +517,17 @@ class SerialPortReader:
         if len(parts) < 8:
             return
 
+        # Convert Arduino timestamp (micros) -> recording-relative timestamp (ms)
+        # when sync is available.
+        try:
+            if self._sync_offset_us is not None and self._record_start_host_us is not None:
+                arduino_us = float(parts[0])
+                host_us = arduino_us + float(self._sync_offset_us)
+                rel_us = host_us - float(self._record_start_host_us)
+                parts[0] = str(int(round(rel_us / 1000.0)))
+        except Exception:
+            pass
+
         with self._log_lock:
             if self._log_fp is None:
                 return
@@ -440,6 +561,10 @@ class VideoWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Surgical Imaging Interface")
         self.resize(1000, 600)
+
+        # Data session (Data/<Session>/...)
+        self.session_name: str = ""
+        self.session_dir: Optional[Path] = None
         
         # Set dark theme
         self.setStyleSheet("""
@@ -602,6 +727,13 @@ class VideoWindow(QMainWindow):
         recording_layout.setSpacing(6)
 
         # Recording controls
+        session_row = QHBoxLayout()
+        session_row.addWidget(QLabel("Session Name:"))
+        self.session_name_input = QLineEdit()
+        self.session_name_input.setPlaceholderText("e.g., WhiteCylinder")
+        session_row.addWidget(self.session_name_input)
+        recording_layout.addLayout(session_row)
+
         btn_layout = QHBoxLayout()
         self.start_record_btn = QPushButton("Start Recording")
         self.start_record_btn.clicked.connect(self.start_recording)
@@ -943,20 +1075,62 @@ class VideoWindow(QMainWindow):
         """Log changes to frame selection"""
         self.log_message(f"Frame selection updated for {segment_name}: {selected_count}/{total_count} frames selected")
 
+    def _segment_frames_output_dir(self, seg: dict) -> str:
+        """Return folder path where extracted frames for a segment are stored."""
+        session_dir = self._get_session_dir()
+        folder = self._segment_folder_name(seg)
+        frames_dir = session_dir / folder / "Frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        return str(frames_dir)
+
+    def _segment_folder_name(self, seg: dict) -> str:
+        name = str(seg.get("name", "segment")).strip() or "segment"
+        safe_name = _sanitize_filename_component(name.replace(" ", "_")) or "segment"
+        try:
+            start_str = seg["start"].toString("HH-mm-ss")
+            end_str = seg["end"].toString("HH-mm-ss")
+        except Exception:
+            start_str = "00-00-00"
+            end_str = "00-00-00"
+        return f"{safe_name}__{start_str}__{end_str}"
+
+    def _get_session_dir(self) -> Path:
+        # Read from UI if available
+        try:
+            name = self.session_name_input.text().strip()
+        except Exception:
+            name = ""
+
+        # If user hasn't specified a name, reuse the existing session directory.
+        if not name and getattr(self, "session_dir", None) is not None:
+            try:
+                return Path(self.session_dir)
+            except Exception:
+                pass
+
+        if not name:
+            name = datetime.now().strftime("Session_%Y%m%d_%H%M%S")
+
+        safe = _sanitize_filename_component(name) or "Session"
+        self.session_name = safe
+        self.session_dir = DATA_DIR / safe
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        return self.session_dir
+
     def open_frame_browser(self):
         from frame_browser import FrameBrowser
         if not self.video_path:
             QMessageBox.warning(self, "No Video", "Load a video before viewing frames.")
             return
 
-        segments = [(seg["name"], f"{seg['name'].replace(' ', '_')}_frame_output") for seg in self.segments]
+        segments = [(seg["name"], self._segment_frames_output_dir(seg)) for seg in self.segments]
 
         initial_selection = {folder: images.copy() for folder, images in self.selected_frames.items()}
         # Filtering hook: if you add a filter/scoring routine, populate initial_selection
         # with any frames you wish to auto-uncheck before opening the browser.
         # Example (disabled):
         # for seg in self.segments:
-        #     folder_path = f"{seg['name'].replace(' ', '_')}_frame_output"
+        #     folder_path = self._segment_frames_output_dir(seg)
         #     results = run_filter(folder_path)
         #     initial_selection[folder_path] = results
 
@@ -996,9 +1170,16 @@ class VideoWindow(QMainWindow):
             end_sec = QTime(0, 0).secsTo(seg["end"])
             start_frame = int(start_sec * self.fps)
             end_frame = int(end_sec * self.fps)
-            folder_name = f"{name.replace(' ', '_')}_frame_output"
+            frames_folder = self._segment_frames_output_dir(seg)
 
-            worker = SegmentExtractor(self.video_path, folder_name, start_frame, end_frame, fps=2, name=name)
+            worker = SegmentExtractor(
+                self.video_path,
+                frames_folder,
+                start_frame,
+                end_frame,
+                fps=2,
+                name=name,
+            )
             worker.progress.connect(self.update_segment_progress)
             worker.finished_parsing.connect(self.on_finished_parsing)
             self.worker_threads.append(worker)
@@ -1548,9 +1729,14 @@ class VideoWindow(QMainWindow):
         if self._serial_reader is None:
             return
 
-        safe_port = _sanitize_filename_component(str(getattr(self, 'selected_com_port', '')))
-        csv_path = out_video_path.parent / f"{out_video_path.stem}_serial_{safe_port}.csv"
-        header = "Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z"
+        csv_path = out_video_path.parent / "IMUTimeStamp.csv"
+        header = "timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z"
+
+        # Attempt SYNC-based time alignment (Arduino micros -> host clock).
+        try:
+            self._sync_imu_timebase()
+        except Exception:
+            pass
 
         try:
             self._serial_reader.enable_logging(csv_path, header)
@@ -1559,6 +1745,77 @@ class VideoWindow(QMainWindow):
         except Exception as e:
             self.serial_csv_path = None
             self.log_message(f"Failed to enable serial CSV logging: {e}")
+
+    def _sync_imu_timebase(self, timeout_s: float = 0.6) -> None:
+        """Align Arduino IMU timestamps (micros) to recording timebase (ms).
+
+        Uses a single SYNC exchange:
+        - host sends "SYNC\n"
+        - Arduino replies "SYNC,<micros>"
+        Offset is estimated via midpoint timing to reduce serial latency bias.
+        """
+        reader = getattr(self, "_serial_reader", None)
+        if reader is None:
+            return
+
+        # Ensure we have a recording start marker.
+        record_start_us = getattr(self, "record_start_host_us", None)
+        if record_start_us is None:
+            record_start_us = float(time.perf_counter() * 1_000_000.0)
+            self.record_start_host_us = record_start_us
+
+        try:
+            reader.flush_input()
+        except Exception:
+            pass
+
+        t_send_us = float(time.perf_counter() * 1_000_000.0)
+        try:
+            reader.send_line("SYNC")
+        except Exception:
+            pass
+
+        deadline = time.perf_counter() + float(timeout_s)
+        arduino_us = None
+        t_recv_us = None
+        while time.perf_counter() < deadline:
+            lines = []
+            try:
+                lines = reader.pop_lines()
+            except Exception:
+                lines = []
+            for line in lines:
+                s = (line or "").strip()
+                if not s.startswith("SYNC,"):
+                    continue
+                try:
+                    arduino_us = float(s.split(",", 1)[1].strip())
+                    t_recv_us = float(time.perf_counter() * 1_000_000.0)
+                except Exception:
+                    arduino_us = None
+                    t_recv_us = None
+                break
+            if arduino_us is not None:
+                break
+            time.sleep(0.005)
+
+        if arduino_us is None or t_recv_us is None:
+            # No sync; log raw timestamps.
+            try:
+                reader.set_time_sync(None, None)
+            except Exception:
+                pass
+            self.log_message("IMU sync: SYNC not received; logging raw Arduino timestamps")
+            return
+
+        t_mid_us = (t_send_us + t_recv_us) / 2.0
+        sync_offset_us = t_mid_us - arduino_us
+
+        try:
+            reader.set_time_sync(sync_offset_us, float(record_start_us))
+        except Exception:
+            pass
+        self.log_message("IMU sync: established")
 
     def _stop_serial_capture(self, stop_reader: bool = False) -> None:
         if self._serial_reader is not None:
@@ -1626,12 +1883,10 @@ class VideoWindow(QMainWindow):
 
         h, w = frame.shape[:2]
 
-        # Recordings directory (project-root/Recordings)
-        recordings_dir = Path(__file__).parent.parent / "Recordings"
-        recordings_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = self._get_session_dir()
+        session_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = recordings_dir / f"recording_{self.selected_camera_idx}_{timestamp}.mp4"
+        out_path = session_dir / "Recording.mp4"
 
         # Fixed output FPS to guarantee duration correctness.
         # Using camera-reported FPS is unreliable on some webcams (can cause 3x speed errors).
@@ -1651,6 +1906,8 @@ class VideoWindow(QMainWindow):
         self.is_recording = True
         self.recording_start_time = datetime.now()
         self.recording_file_path = str(out_path)
+        # Host monotonic start time (microseconds)
+        self.record_start_host_us = float(time.perf_counter() * 1_000_000.0)
         self._record_latest_frame = frame
         self._record_next_write_t = time.perf_counter()
         self._recording_started_logged = False
