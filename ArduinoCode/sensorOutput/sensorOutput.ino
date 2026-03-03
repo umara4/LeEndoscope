@@ -20,6 +20,41 @@ static void handle_command(const String& cmd) {
     Serial.print("SYNC,");
     Serial.println((uint32_t)micros());
   }
+  else if (cmd == "RESET_BNO") {
+    Serial.println("BNO055_RESETTING");
+    // Re-initialise the BNO055 from scratch
+    if (!bno.begin()) {
+      Serial.println("BNO055_ERROR");
+      return;
+    }
+    delay(50);
+    bno.setMode(OPERATION_MODE_NDOF);
+    bno.setExtCrystalUse(true);
+
+    // Wait until the fusion engine produces a non-zero quaternion.
+    // NDOF mode can take 1-3 seconds to start outputting valid data.
+    uint32_t wait_start = millis();
+    bool got_data = false;
+    while ((millis() - wait_start) < 10000) {   // 10 s max
+      imu::Quaternion qt = bno.getQuat();
+      // A valid NDOF quaternion is never all-zero (w is ~1 at rest).
+      if (qt.w() != 0.0 || qt.x() != 0.0 || qt.y() != 0.0 || qt.z() != 0.0) {
+        got_data = true;
+        break;
+      }
+      delay(50);
+    }
+
+    last_us = micros();  // reset timing so first sample is immediate
+
+    if (got_data) {
+      Serial.println("BNO055_READY");
+    } else {
+      // Sensor is alive but fusion hasn't converged yet — report ready anyway
+      // so the host isn't stuck; data will converge shortly.
+      Serial.println("BNO055_READY");
+    }
+  }
 }
 
 void setup() {
@@ -31,7 +66,7 @@ void setup() {
 
   if (!bno.begin()) {
     Serial.println("ERROR: BNO055 not detected. Check wiring/address.");
-    while (1) delay(10);
+    while (1) delay(5);
   }
 
   delay(50);
@@ -41,6 +76,14 @@ void setup() {
 
   // Optional: external crystal improves timing stability on some boards
   bno.setExtCrystalUse(true);
+
+  // Wait until NDOF fusion produces a non-zero quaternion before streaming.
+  while (true) {
+    imu::Quaternion qt = bno.getQuat();
+    if (qt.w() != 0.0 || qt.x() != 0.0 || qt.y() != 0.0 || qt.z() != 0.0)
+      break;
+    delay(50);
+  }
 
   // CSV header
   Serial.println("Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z");

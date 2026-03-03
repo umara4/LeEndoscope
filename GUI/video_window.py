@@ -263,6 +263,9 @@ import numpy as np
 import time
 import threading
 import csv
+import shutil
+import json
+import subprocess
 from collections import deque
 from typing import Optional
 try:
@@ -282,6 +285,83 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QTextCursor
 from geometry_store import load_geometry, save_geometry, get_start_size
 
+
+class ArduinoFlasher(QThread):
+    """Async Arduino flashing in a separate thread to keep UI responsive."""
+    output_line = pyqtSignal(str)  # Emits output lines
+    finished = pyqtSignal(int, str)  # (return_code, final_message)
+
+    def __init__(self, cmd, timeout_s=180.0):
+        super().__init__()
+        self.cmd = cmd
+        self.timeout_s = timeout_s
+
+    def run(self):
+        try:
+            proc = subprocess.Popen(
+                self.cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+            )
+        except Exception as e:
+            self.finished.emit(1, f"Failed to start command: {e}")
+            return
+
+        collected = []
+        start_t = time.time()
+        try:
+            while True:
+                if proc.stdout is not None:
+                    try:
+                        line = proc.stdout.readline()
+                    except Exception:
+                        break
+                else:
+                    line = ""
+
+                if line:
+                    collected.append(line)
+                    self.output_line.emit(line.rstrip("\r\n"))
+
+                ret = proc.poll()
+                if ret is not None:
+                    break
+
+                if (time.time() - start_t) > float(self.timeout_s):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    self.finished.emit(1, "Command timed out")
+                    return
+
+                time.sleep(0.01)
+
+            # Read any remaining output
+            try:
+                if proc.stdout is not None:
+                    remaining = proc.stdout.read() or ""
+                    if remaining:
+                        collected.append(remaining)
+                        for remaining_line in remaining.split("\n"):
+                            if remaining_line:
+                                self.output_line.emit(remaining_line.rstrip("\r\n"))
+            except Exception:
+                pass
+
+            output_text = "".join(collected).strip()
+            self.finished.emit(int(proc.returncode or 0), output_text)
+        finally:
+            try:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            except Exception:
+                pass
+
+
 class SegmentExtractor(QThread):
     progress = pyqtSignal(tuple)  # (segment_name, progress_value)
     finished_parsing = pyqtSignal(str)  # emits segment name when done
@@ -294,6 +374,7 @@ class SegmentExtractor(QThread):
         end_frame,
         fps=2,
         name="",
+        session_dir=None,
     ):
         super().__init__()
         self.video_path = video_path
@@ -302,6 +383,7 @@ class SegmentExtractor(QThread):
         self.end_frame = end_frame
         self.fps = fps
         self.name = name
+        self.session_dir = session_dir
 
     def calculate_SNR(self,frame):
         gray_scale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -342,17 +424,30 @@ class SegmentExtractor(QThread):
     def run(self):
         os.makedirs(self.output_folder, exist_ok=True)
 
-        # Per-segment frame timestamps (absolute ms)
-        ts_path = Path(self.output_folder) / "FrameTimeStamp.csv"
-        csv_fp = None
-        csv_writer = None
-        try:
-            csv_fp = open(ts_path, "w", encoding="utf-8", newline="")
-            csv_writer = csv.writer(csv_fp)
-            csv_writer.writerow(["frame_name", "timestamp_ms"])
-        except Exception:
-            csv_fp = None
-            csv_writer = None
+        # Load recording-wide frame timestamps from Raw-Data
+        recording_frame_ts = self._load_recording_frame_timestamps()
+        # Load recording-wide IMU data from Raw-Data
+        recording_imu_data = self._load_recording_imu_data()
+
+        # Prepare averaged IMU CSV in Output-Data
+        output_data_dir = None
+        imu_output_fp = None
+        imu_output_writer = None
+        if self.session_dir and recording_imu_data:
+            try:
+                output_data_dir = Path(self.session_dir) / "Output-Data" / self.name
+                output_data_dir.mkdir(parents=True, exist_ok=True)
+                imu_output_path = output_data_dir / "averaged_imu.csv"
+                imu_output_fp = open(imu_output_path, "w", encoding="utf-8", newline="")
+                imu_output_writer = csv.writer(imu_output_fp)
+                imu_output_writer.writerow([
+                    "frame_name", "frame_timestamp_ms", 
+                    "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
+                    "avg_WX", "avg_WY", "avg_WZ"
+                ])
+            except Exception:
+                imu_output_fp = None
+                imu_output_writer = None
 
         cap = cv2.VideoCapture(self.video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
@@ -376,12 +471,21 @@ class SegmentExtractor(QThread):
                     if (not pos_msec or pos_msec <= 0) and video_fps > 0:
                         pos_msec = (frame_count * 1000.0) / video_fps
 
-                    if csv_writer is not None:
+                    # Get timestamp from recording FrameTimestamp.csv for this frame_count
+                    recording_ts_ms = recording_frame_ts.get(frame_count, pos_msec)
+                    
+                    # Find 10 closest IMU samples and average them
+                    if imu_output_writer and recording_imu_data:
                         try:
-                            ts_ms = int(round(float(pos_msec))) if pos_msec is not None else 0
+                            avg_imu = self._get_averaged_imu(recording_ts_ms, recording_imu_data, k=10)
+                            if avg_imu:
+                                imu_output_writer.writerow([
+                                    frame_name, f"{recording_ts_ms:.3f}",
+                                    f"{avg_imu[0]:.6f}", f"{avg_imu[1]:.6f}", f"{avg_imu[2]:.6f}", f"{avg_imu[3]:.6f}",
+                                    f"{avg_imu[4]:.6f}", f"{avg_imu[5]:.6f}", f"{avg_imu[6]:.6f}"
+                                ])
                         except Exception:
-                            ts_ms = 0
-                        csv_writer.writerow([frame_name, ts_ms])
+                            pass
 
                     saved_count += 1
 
@@ -391,14 +495,92 @@ class SegmentExtractor(QThread):
                 frame_count += 1
         finally:
             try:
-                if csv_fp is not None:
-                    csv_fp.close()
+                if imu_output_fp is not None:
+                    imu_output_fp.close()
             except Exception:
                 pass
 
         cap.release()
         selected, rejected = self.eval_frames()
         self.finished_parsing.emit(self.name)
+
+    def _load_recording_frame_timestamps(self):
+        """Load frame timestamps from Raw-Data/FrameTimestamp.csv, keyed by frame index."""
+        frame_ts = {}
+        if not self.session_dir:
+            return frame_ts
+        try:
+            raw_data_dir = Path(self.session_dir) / "Raw-Data"
+            ts_path = raw_data_dir / "FrameTimestamp.csv"
+            if not ts_path.exists():
+                return frame_ts
+            with open(ts_path, "r", encoding="utf-8") as fp:
+                reader = csv.reader(fp)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 2:
+                        try:
+                            frame_idx = int(row[0])
+                            ts_ms = float(row[1])
+                            frame_ts[frame_idx] = ts_ms
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return frame_ts
+
+    def _load_recording_imu_data(self):
+        """Load IMU data from Raw-Data/IMUTimeStamp.csv as list of (timestamp_ms, [qw, qx, qy, qz, wx, wy, wz])."""
+        imu_data = []
+        if not self.session_dir:
+            return imu_data
+        try:
+            raw_data_dir = Path(self.session_dir) / "Raw-Data"
+            imu_path = raw_data_dir / "IMUTimeStamp.csv"
+            if not imu_path.exists():
+                return imu_data
+            with open(imu_path, "r", encoding="utf-8") as fp:
+                reader = csv.reader(fp)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 8:
+                        try:
+                            ts_ms = float(row[0].strip())
+                            qw = float(row[1].strip())
+                            qx = float(row[2].strip())
+                            qy = float(row[3].strip())
+                            qz = float(row[4].strip())
+                            wx = float(row[5].strip())
+                            wy = float(row[6].strip())
+                            wz = float(row[7].strip())
+                            imu_data.append((ts_ms, [qw, qx, qy, qz, wx, wy, wz]))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return imu_data
+
+    def _get_averaged_imu(self, target_ts_ms, imu_data, k=10):
+        """Find k closest IMU samples by timestamp and return their average.
+        Returns [avg_qw, avg_qx, avg_qy, avg_qz, avg_wx, avg_wy, avg_wz] or None.
+        """
+        if not imu_data:
+            return None
+        # Compute distances and sort
+        distances = [(abs(ts - target_ts_ms), idx) for idx, (ts, _) in enumerate(imu_data)]
+        distances.sort()
+        # Take k closest
+        closest_indices = [idx for _, idx in distances[:k]]
+        if not closest_indices:
+            return None
+        # Average the IMU values
+        sums = [0.0] * 7
+        for idx in closest_indices:
+            _, vals = imu_data[idx]
+            for i in range(7):
+                sums[i] += vals[i]
+        count = len(closest_indices)
+        return [s / count for s in sums]
 
 
 def _sanitize_filename_component(value: str) -> str:
@@ -431,11 +613,17 @@ class SerialPortReader:
         # Time sync (Arduino micros -> host perf_counter micros -> recording-relative ms)
         self._sync_offset_us: Optional[float] = None
         self._record_start_host_us: Optional[float] = None
+        self._imu_first_logged_ms: Optional[float] = None
+        self._last_logged_ms: Optional[float] = None
+        self._logged_rows: int = 0
 
     def set_time_sync(self, sync_offset_us: Optional[float], record_start_host_us: Optional[float]) -> None:
         # sync_offset_us maps: host_us ~= arduino_us + sync_offset_us
         self._sync_offset_us = sync_offset_us
         self._record_start_host_us = record_start_host_us
+        self._imu_first_logged_ms = None
+        self._last_logged_ms = None
+        self._logged_rows = 0
 
     def flush_input(self) -> None:
         # Clear both pyserial RX buffer and in-memory buffer.
@@ -462,7 +650,17 @@ class SerialPortReader:
             raise RuntimeError("pyserial is not installed")
         if self._thread and self._thread.is_alive():
             return
-        self._ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
+        # Open serial WITHOUT toggling DTR/RTS to prevent ESP32 auto-reset
+        # (CP2102 boards reset the MCU when DTR transitions, which reinitialises
+        # the BNO055 and causes it to output zeros during NDOF warmup).
+        ser = serial.Serial()
+        ser.port = self.port
+        ser.baudrate = self.baud
+        ser.timeout = self.timeout
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        self._ser = ser
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -488,6 +686,9 @@ class SerialPortReader:
             self._log_fp = open(csv_path, "w", encoding="utf-8", newline="\n")
             self._log_fp.write(header.rstrip("\n") + "\n")
             self._log_fp.flush()
+        self._imu_first_logged_ms = None
+        self._last_logged_ms = None
+        self._logged_rows = 0
 
     def disable_logging(self) -> None:
         with self._log_lock:
@@ -506,6 +707,9 @@ class SerialPortReader:
             self._buffer.clear()
             return lines
 
+    def get_logging_stats(self) -> tuple[int, Optional[float]]:
+        return int(self._logged_rows), self._last_logged_ms
+
     def _maybe_log_line(self, line: str) -> None:
         if not line:
             return
@@ -518,14 +722,26 @@ class SerialPortReader:
         if len(parts) < 8:
             return
 
-        # Convert Arduino timestamp (micros) -> recording-relative timestamp (ms)
-        # when sync is available.
+        # Convert Arduino timestamp (micros) -> recording-relative timestamp (ms).
         try:
+            arduino_us = float(parts[0])
             if self._sync_offset_us is not None and self._record_start_host_us is not None:
-                arduino_us = float(parts[0])
                 host_us = arduino_us + float(self._sync_offset_us)
-                rel_us = host_us - float(self._record_start_host_us)
-                parts[0] = str(int(round(rel_us / 1000.0)))
+                rel_ms = (host_us - float(self._record_start_host_us)) / 1000.0
+            else:
+                # Fallback: no host sync available, keep Arduino-relative timing in ms.
+                rel_ms = arduino_us / 1000.0
+
+            if self._imu_first_logged_ms is None:
+                self._imu_first_logged_ms = rel_ms
+
+            rel_ms = rel_ms - float(self._imu_first_logged_ms)
+            if rel_ms < 0:
+                rel_ms = 0.0
+
+            parts[0] = str(int(round(rel_ms)))
+            self._last_logged_ms = float(rel_ms)
+            self._logged_rows += 1
         except Exception:
             pass
 
@@ -565,6 +781,7 @@ class VideoWindow(QMainWindow):
 
         # Data session (Data/<Session>/...)
         self.session_name: str = ""
+        self.session_base_name: str = ""  # Base name without timestamp
         self.session_dir: Optional[Path] = None
         
         # Set dark theme
@@ -977,12 +1194,30 @@ class VideoWindow(QMainWindow):
         self.is_recording = False
         self.recording_writer = None
         self.recording_file_path = None
+        self.frame_csv_path: Optional[str] = None
+        self._frame_ts_fp = None
+        self._frame_ts_writer = None
+        self._record_frame_index = 0
+        self._record_last_frame_ts_ms = 0.0
+        self._record_start_perf = None
 
         # Serial capture (shared between monitor + CSV logging)
         self.serial_monitor_visible = False
         self.serial_monitor_autoscroll = True
         self._serial_reader: Optional[SerialPortReader] = None
         self.serial_csv_path: Optional[str] = None
+        self._is_flashing_arduino = False
+        
+        # Flash async attributes
+        self._flash_pending_start_camera = False
+        self._flash_pending_camera_idx = None
+        self._flash_compile_cmd = []
+        self._flash_upload_cmd = []
+        self._flash_com_port = None
+        self._flash_compile_ok = False
+        self._flash_upload_ok = False
+        self._flashing_stage = None
+        self.flash_thread = None
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
@@ -1079,8 +1314,10 @@ class VideoWindow(QMainWindow):
     def _segment_frames_output_dir(self, seg: dict) -> str:
         """Return folder path where extracted frames for a segment are stored."""
         session_dir = self._get_session_dir()
-        folder = self._segment_folder_name(seg)
-        frames_dir = session_dir / folder / "Frames"
+        # Use clean segment name for Output-Data folder
+        name = str(seg.get("name", "segment")).strip() or "segment"
+        safe_name = _sanitize_filename_component(name.replace(" ", "_")) or "segment"
+        frames_dir = session_dir / "Output-Data" / safe_name
         frames_dir.mkdir(parents=True, exist_ok=True)
         return str(frames_dir)
 
@@ -1102,17 +1339,26 @@ class VideoWindow(QMainWindow):
         except Exception:
             name = ""
 
-        # If user hasn't specified a name, reuse the existing session directory.
-        if not name and getattr(self, "session_dir", None) is not None:
+        # Normalize empty name to "Session"
+        if not name:
+            name = "Session"
+
+        # If we already have a session directory AND the base name matches, reuse it
+        current_base = getattr(self, "session_base_name", "")
+        if (getattr(self, "session_dir", None) is not None and 
+            current_base and 
+            name == current_base):
             try:
                 return Path(self.session_dir)
             except Exception:
                 pass
 
-        if not name:
-            name = datetime.now().strftime("Session_%Y%m%d_%H%M%S")
-
-        safe = _sanitize_filename_component(name) or "Session"
+        # Create new session with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = _sanitize_filename_component(name) or "Session"
+        safe = _sanitize_filename_component(f"{base}_{timestamp}") or f"Session_{timestamp}"
+        
+        self.session_base_name = name  # Store the base name for future comparisons
         self.session_name = safe
         self.session_dir = DATA_DIR / safe
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -1180,6 +1426,7 @@ class VideoWindow(QMainWindow):
                 end_frame,
                 fps=2,
                 name=name,
+                session_dir=getattr(self, 'session_dir', None),
             )
             worker.progress.connect(self.update_segment_progress)
             worker.finished_parsing.connect(self.on_finished_parsing)
@@ -1565,8 +1812,262 @@ class VideoWindow(QMainWindow):
                 display_text = f"{port} - {desc}" if desc else port
                 self.setup_comport_combo.addItem(display_text, port)
 
+    def _find_arduino_cli_executable(self) -> Optional[str]:
+        candidates = [
+            "arduino-cli",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Arduino CLI", "arduino-cli.exe"),
+            r"C:\Program Files\Arduino CLI\arduino-cli.exe",
+            r"C:\Program Files (x86)\Arduino CLI\arduino-cli.exe",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate == "arduino-cli":
+                    resolved = shutil.which(candidate)
+                    if resolved:
+                        return resolved
+                else:
+                    if Path(candidate).exists():
+                        return candidate
+            except Exception:
+                pass
+        return None
+
+    # Known USB VID/PID combos that map to specific FQBNs.
+    _VID_PID_FQBN_MAP = {
+        ("0x10C4", "0xEA60"): "esp32:esp32:esp32",   # Silicon Labs CP2102 -> ESP32
+        ("0x1A86", "0x7523"): "esp32:esp32:esp32",   # CH340 -> common ESP32 clone
+    }
+
+    def _detect_fqbn_for_port(self, cli_path: str, com_port: str) -> str:
+        default_fqbn = "esp32:esp32:esp32"
+        try:
+            proc = subprocess.run(
+                [cli_path, "board", "list", "--format", "json"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            payload = proc.stdout or ""
+            parsed = json.loads(payload) if payload.strip() else {}
+            detected_ports = parsed.get("detected_ports", [])
+            for entry in detected_ports:
+                address = str(entry.get("port", {}).get("address", "")).strip()
+                if address.upper() != str(com_port).strip().upper():
+                    continue
+                # First try matching_boards (auto-detected by arduino-cli)
+                for board in entry.get("matching_boards", []) or []:
+                    fqbn = str(board.get("fqbn", "")).strip()
+                    if fqbn:
+                        return fqbn
+                # Fallback: match by USB VID/PID
+                props = entry.get("port", {}).get("properties", {})
+                vid = str(props.get("vid", "")).strip().upper()
+                pid = str(props.get("pid", "")).strip().upper()
+                # Normalise to 0xHHHH form
+                vid_norm = vid if vid.startswith("0X") else f"0X{vid}"
+                pid_norm = pid if pid.startswith("0X") else f"0X{pid}"
+                for (map_vid, map_pid), fqbn in self._VID_PID_FQBN_MAP.items():
+                    if vid_norm == map_vid.upper() and pid_norm == map_pid.upper():
+                        return fqbn
+        except Exception:
+            pass
+        return default_fqbn
+
+    def _append_serial_monitor_text(self, text: str) -> None:
+        if not text:
+            return
+        try:
+            autoscroll = getattr(self, 'serial_monitor_autoscroll', True)
+            vbar = self.serial_monitor_text.verticalScrollBar()
+            prev_scroll = vbar.value()
+            self.serial_monitor_text.append(str(text).rstrip("\r\n"))
+            if autoscroll:
+                self.serial_monitor_text.moveCursor(QTextCursor.MoveOperation.End)
+            else:
+                vbar.setValue(prev_scroll)
+        except Exception:
+            pass
+
+    def _run_flash_async(self, compile_cmd: list[str], upload_cmd: list[str], com_port: str) -> None:
+        """Start async Arduino flash process with compile and upload."""
+        self._is_flashing_arduino = True
+        self._flash_compile_cmd = compile_cmd
+        self._flash_upload_cmd = upload_cmd
+        self._flash_com_port = com_port
+        self._flash_compile_ok = False
+        self._flash_upload_ok = False
+
+        # Start compile
+        self._flashing_stage = "compile"
+        self._append_serial_monitor_text(f"[FLASH] Running: {' '.join(compile_cmd)}")
+        self.flash_thread = ArduinoFlasher(compile_cmd, timeout_s=180.0)
+        self.flash_thread.output_line.connect(self._append_serial_monitor_text)
+        self.flash_thread.finished.connect(self._on_flash_compile_finished)
+        self.flash_thread.start()
+
+    def _on_flash_compile_finished(self, rc: int, output: str) -> None:
+        """Handle compile completion."""
+        if rc == 0:
+            self._flash_compile_ok = True
+            self._append_serial_monitor_text("[FLASH] Compile successful, starting upload...")
+            # Start upload
+            self._flashing_stage = "upload"
+            self._append_serial_monitor_text(f"[FLASH] Running: {' '.join(self._flash_upload_cmd)}")
+            self.flash_thread = ArduinoFlasher(self._flash_upload_cmd, timeout_s=180.0)
+            self.flash_thread.output_line.connect(self._append_serial_monitor_text)
+            self.flash_thread.finished.connect(self._on_flash_upload_finished)
+            self.flash_thread.start()
+        else:
+            self._is_flashing_arduino = False
+            self._append_serial_monitor_text(f"[FLASH] Compile failed: {output}")
+            self._show_flash_result(False, "Compile failed")
+
+    def _on_flash_upload_finished(self, rc: int, output: str) -> None:
+        """Handle upload completion."""
+        self._is_flashing_arduino = False
+        if rc == 0:
+            self._flash_upload_ok = True
+            self._append_serial_monitor_text("[FLASH] Upload successful")
+            self._show_flash_result(True, f"Uploaded to {self._flash_com_port}")
+        else:
+            self._append_serial_monitor_text(f"[FLASH] Upload failed: {output}")
+            self._show_flash_result(False, "Upload failed")
+
+    def _show_flash_result(self, success: bool, msg: str) -> None:
+        """Show flash result and continue setup if needed."""
+        if success:
+            if self._flash_pending_start_camera:
+                self.log_message("Arduino flash finished successfully!")
+                self._append_serial_monitor_text("[FLASH] Resetting BNO055 sensor...")
+                self.log_message("Resetting BNO055 sensor...")
+                # Start the BNO055 reset sequence before enabling camera/IMU
+                self._reset_bno055_after_flash()
+        else:
+            self.log_message(f"Arduino flash failed: {msg}")
+            self.setup_save_button.setEnabled(True)
+            QMessageBox.critical(self, "Flash Failed", msg)
+
+    def _reset_bno055_after_flash(self) -> None:
+        """Open serial, send RESET_BNO command, and wait for BNO055_READY."""
+        com_port = self._flash_com_port
+        # Give the ESP32 time to boot after flash
+        import time as _time
+        _time.sleep(2.0)
+
+        try:
+            self._ensure_serial_reader_running()
+        except Exception as e:
+            self._append_serial_monitor_text(f"[ERROR] Cannot open serial after flash: {e}")
+            self._finish_bno_reset(success=False)
+            return
+
+        if self._serial_reader is None:
+            self._append_serial_monitor_text("[ERROR] Serial reader not available for BNO055 reset")
+            self._finish_bno_reset(success=False)
+            return
+
+        # Start monitoring serial output for BNO055_READY
+        self._serial_monitor_timer.start(50)
+        self._bno_reset_attempts = 0
+        self._bno_reset_max_attempts = 3
+        self._send_bno_reset_command()
+
+    def _send_bno_reset_command(self) -> None:
+        """Send the RESET_BNO command and start a timer to check for response."""
+        if self._serial_reader is not None:
+            self._serial_reader.flush_input()
+            self._serial_reader.send_line("RESET_BNO")
+            self._append_serial_monitor_text("[BNO055] Sent RESET_BNO command")
+
+        # Poll for response with a timeout timer
+        self._bno_reset_start_time = time.time()
+        self._bno_reset_timer = QTimer(self)
+        self._bno_reset_timer.timeout.connect(self._check_bno_reset_response)
+        self._bno_reset_timer.start(100)  # check every 100ms
+
+    def _check_bno_reset_response(self) -> None:
+        """Check serial buffer for BNO055_READY response."""
+        elapsed = time.time() - self._bno_reset_start_time
+
+        # Check lines from serial reader
+        if self._serial_reader is not None:
+            lines = self._serial_reader.pop_lines()
+            for line in lines:
+                self._append_serial_monitor_text(line)
+                if "BNO055_READY" in line:
+                    self._bno_reset_timer.stop()
+                    self._append_serial_monitor_text("[BNO055] Sensor reset successful")
+                    self.log_message("BNO055 sensor reset successful")
+                    self._finish_bno_reset(success=True)
+                    return
+                if "BNO055_ERROR" in line:
+                    self._bno_reset_timer.stop()
+                    self._bno_reset_attempts += 1
+                    if self._bno_reset_attempts < self._bno_reset_max_attempts:
+                        self._append_serial_monitor_text(f"[BNO055] Reset failed, retrying ({self._bno_reset_attempts}/{self._bno_reset_max_attempts})...")
+                        self._send_bno_reset_command()
+                    else:
+                        self._append_serial_monitor_text("[BNO055] Reset failed after all retries")
+                        self._finish_bno_reset(success=False)
+                    return
+
+        # Timeout after 8 seconds per attempt
+        if elapsed > 8.0:
+            self._bno_reset_timer.stop()
+            self._bno_reset_attempts += 1
+            if self._bno_reset_attempts < self._bno_reset_max_attempts:
+                self._append_serial_monitor_text(f"[BNO055] Reset timed out, retrying ({self._bno_reset_attempts}/{self._bno_reset_max_attempts})...")
+                self._send_bno_reset_command()
+            else:
+                self._append_serial_monitor_text("[BNO055] Reset timed out after all retries -- proceeding anyway")
+                self._finish_bno_reset(success=True)  # proceed anyway so user isn't stuck
+
+    def _finish_bno_reset(self, success: bool) -> None:
+        """Complete the post-flash setup after BNO055 reset."""
+        try:
+            if hasattr(self, '_bno_reset_timer') and self._bno_reset_timer.isActive():
+                self._bno_reset_timer.stop()
+        except Exception:
+            pass
+
+        if success:
+            self.log_message("IMU data streaming started")
+            # Continue with setup
+            self._finish_setup_after_flash()
+            self.log_message("Camera live preview started")
+        else:
+            self.log_message("BNO055 reset failed -- starting camera anyway")
+            self._finish_setup_after_flash()
+
+        self._flash_pending_start_camera = False
+
+    def _flash_latest_arduino_code(self, com_port: str, continue_setup: bool = False) -> bool:
+        """Start async Arduino flashing. Continues setup after flash if continue_setup=True."""
+        sketch_dir = PROJECT_ROOT / "ArduinoCode" / "sensorOutput"
+        sketch_file = sketch_dir / "sensorOutput.ino"
+
+        if not sketch_dir.exists() or not sketch_file.exists():
+            self._append_serial_monitor_text(f"[ERROR] Sketch not found at {sketch_file}")
+            return False
+
+        cli_path = self._find_arduino_cli_executable()
+        if not cli_path:
+            self._append_serial_monitor_text("[ERROR] arduino-cli not found. Install Arduino CLI and ensure it is on PATH.")
+            return False
+
+        fqbn = self._detect_fqbn_for_port(cli_path, com_port)
+        self._append_serial_monitor_text(f"[FLASH] Detected FQBN: {fqbn}")
+
+        compile_cmd = [cli_path, "compile", "--fqbn", fqbn, str(sketch_dir)]
+        upload_cmd = [cli_path, "upload", "-p", str(com_port), "--fqbn", fqbn, str(sketch_dir)]
+        
+        self._flash_pending_start_camera = continue_setup
+        self._run_flash_async(compile_cmd, upload_cmd, com_port)
+        return True
+
     def save_setup_and_start_camera(self):
-        """Save the selected setup and start showing live camera output"""
+        """Save the selected setup and start flashing Arduino asynchronously"""
         # Get selected camera
         camera_idx = self.setup_camera_combo.currentData()
         if camera_idx is None or camera_idx == -1:
@@ -1586,11 +2087,46 @@ class VideoWindow(QMainWindow):
         # Log the selection
         self.log_message(f"Setup Saved: Camera {camera_idx} and COM PORT {com_port}")
 
+        # Flash latest Arduino sketch on the selected COM port (async).
+        self.setup_save_button.setEnabled(False)
+        self._flash_pending_camera_idx = camera_idx
+
+        # Stop serial monitor timer so it doesn't try to read during flash
+        try:
+            self._serial_monitor_timer.stop()
+        except Exception:
+            pass
+
+        # Fully release the COM port before flashing
+        try:
+            if self._serial_reader is not None:
+                self._serial_reader.stop()
+                self._serial_reader = None
+        except Exception:
+            pass
+
+        # Windows needs a moment for the OS to release the port handle
+        import time as _time
+        _time.sleep(0.5)
+
+        self.log_message("Flashing Arduino with latest sketch...")
+        self._append_serial_monitor_text("[FLASH] Flashing Arduino with latest sketch...")
+        QApplication.processEvents()
+        
+        # Start async flash
+        self._flash_latest_arduino_code(str(com_port), continue_setup=True)
+
+    def _finish_setup_after_flash(self):
+        """Complete setup after Arduino flash finishes successfully."""
+        camera_idx = self._flash_pending_camera_idx
+        
         # Enable Recording widget
         self.set_recording_enabled(True)
 
         # Start live camera preview
         self.start_live_preview(camera_idx)
+        
+        self.setup_save_button.setEnabled(True)
 
     def start_live_preview(self, camera_idx):
         """Start live camera preview and display in video viewer"""
@@ -1655,8 +2191,9 @@ class VideoWindow(QMainWindow):
         self.serial_monitor_button.setText("Serial Monitor ▼" if self.serial_monitor_visible else "Serial Monitor")
 
         if self.serial_monitor_visible:
-            self._ensure_serial_reader_running()
-            self._serial_monitor_timer.start(50)
+            if not getattr(self, '_is_flashing_arduino', False):
+                self._ensure_serial_reader_running()
+                self._serial_monitor_timer.start(50)
         else:
             try:
                 self._serial_monitor_timer.stop()
@@ -1835,6 +2372,146 @@ class VideoWindow(QMainWindow):
             self.log_message(f"Serial CSV saved: {self.serial_csv_path}")
         self.serial_csv_path = None
 
+    def _start_frame_timestamp_logging(self, out_video_path: Path) -> None:
+        csv_path = out_video_path.parent / "FrameTimestamp.csv"
+        self._record_frame_index = 0
+        self._record_last_frame_ts_ms = 0.0
+        self._frame_ts_writer = None
+        self._frame_ts_fp = None
+        try:
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            self._frame_ts_fp = open(csv_path, "w", encoding="utf-8", newline="")
+            self._frame_ts_writer = csv.writer(self._frame_ts_fp)
+            self._frame_ts_writer.writerow(["frame_index", "timestamp_ms", "timestamp_s"])
+            self.frame_csv_path = str(csv_path)
+            self.log_message(f"Frame timestamp logging enabled: {csv_path.name}")
+        except Exception as e:
+            self.frame_csv_path = None
+            self._frame_ts_writer = None
+            self._frame_ts_fp = None
+            self.log_message(f"Failed to enable frame timestamp logging: {e}")
+
+    def _log_recorded_frame_timestamp(self, timestamp_ms: float) -> None:
+        writer = getattr(self, "_frame_ts_writer", None)
+        if writer is None:
+            return
+        ts_ms = max(0.0, float(timestamp_ms))
+        try:
+            writer.writerow([
+                int(self._record_frame_index),
+                f"{ts_ms:.3f}",
+                f"{(ts_ms / 1000.0):.6f}",
+            ])
+            if self._frame_ts_fp is not None:
+                self._frame_ts_fp.flush()
+            self._record_frame_index += 1
+            self._record_last_frame_ts_ms = ts_ms
+        except Exception:
+            pass
+
+    def _stop_frame_timestamp_logging(self) -> None:
+        try:
+            if self._frame_ts_fp is not None:
+                self._frame_ts_fp.close()
+        except Exception:
+            pass
+        if getattr(self, "frame_csv_path", None):
+            self.log_message(f"Frame timestamp CSV saved: {self.frame_csv_path}")
+        self._frame_ts_fp = None
+        self._frame_ts_writer = None
+        self.frame_csv_path = None
+
+    def _update_recording_timeline(self) -> None:
+        """Grow timeline end while recording based on frames written."""
+        out_fps = float(getattr(self, "_record_out_fps", 30.0) or 30.0)
+        frame_count = int(getattr(self, "_record_frame_index", 0))
+        if frame_count <= 0:
+            return
+
+        self.total_frames = frame_count
+        self.fps = out_fps
+        self.current_frame = max(0, frame_count - 1)
+
+        self.timeline_slider.setEnabled(True)
+        self.timeline_slider.setMaximum(max(0, self.total_frames - 1))
+        self.timeline_slider.setValue(self.current_frame)
+
+        duration_seconds = int(self.total_frames / max(1.0, self.fps))
+        # During recording, keep the left label fixed at the recording start.
+        self.current_time_label.setText("00:00:00")
+        self.total_time_label.setText(self.seconds_to_time(duration_seconds))
+
+    def _align_imu_csv_duration(self, csv_path: Optional[str], target_end_ms: Optional[float]) -> tuple[int, Optional[float], bool]:
+        """Scale IMU timestamp column so first=0 and last ~= target_end_ms.
+
+        Returns: (row_count, aligned_last_ms, changed)
+        """
+        if not csv_path or target_end_ms is None:
+            return 0, None, False
+
+        path = Path(csv_path)
+        if not path.exists() or target_end_ms < 0:
+            return 0, None, False
+
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as fp:
+                rows = list(csv.reader(fp))
+        except Exception:
+            return 0, None, False
+
+        if len(rows) <= 1:
+            return 0, None, False
+
+        header = rows[0]
+        data_rows = rows[1:]
+
+        parsed_ts = []
+        for row in data_rows:
+            if not row:
+                continue
+            try:
+                parsed_ts.append(float(row[0]))
+            except Exception:
+                continue
+
+        if not parsed_ts:
+            return 0, None, False
+
+        first_ts = float(parsed_ts[0])
+        rel_ts = [max(0.0, t - first_ts) for t in parsed_ts]
+        src_end = float(rel_ts[-1]) if rel_ts else 0.0
+
+        if src_end <= 0.0:
+            scale = 1.0
+        else:
+            scale = float(target_end_ms) / src_end
+
+        changed = abs(scale - 1.0) > 0.001
+
+        aligned_ts = [max(0.0, t * scale) for t in rel_ts]
+
+        ts_idx = 0
+        for row in data_rows:
+            if not row:
+                continue
+            try:
+                _ = float(row[0])
+            except Exception:
+                continue
+            row[0] = str(int(round(aligned_ts[ts_idx])))
+            ts_idx += 1
+
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as fp:
+                writer = csv.writer(fp)
+                writer.writerow(header)
+                writer.writerows(data_rows)
+        except Exception:
+            return len(parsed_ts), None, False
+
+        aligned_last = float(aligned_ts[-1]) if aligned_ts else None
+        return len(parsed_ts), aligned_last, changed
+
     def start_recording(self):
         """Start recording from the selected camera.
 
@@ -1908,10 +2585,14 @@ class VideoWindow(QMainWindow):
         self.recording_start_time = datetime.now()
         self.recording_file_path = str(out_path)
         # Host monotonic start time (microseconds)
-        self.record_start_host_us = float(time.perf_counter() * 1_000_000.0)
+        self._record_start_perf = time.perf_counter()
+        self.record_start_host_us = float(self._record_start_perf * 1_000_000.0)
         self._record_latest_frame = frame
-        self._record_next_write_t = time.perf_counter()
+        self._record_next_write_t = self._record_start_perf
         self._recording_started_logged = False
+
+        # Start frame timestamp CSV logging only while recording
+        self._start_frame_timestamp_logging(out_path)
 
         # Start serial CSV logging only while recording
         self._start_serial_csv_logging(out_path)
@@ -1921,9 +2602,18 @@ class VideoWindow(QMainWindow):
         self.stop_record_btn.setEnabled(True)
         self.start_record_btn.setText("Recording...")
 
+        # Prepare timeline to grow with recording duration.
+        self.timeline_slider.setEnabled(True)
+        self.timeline_slider.setMaximum(0)
+        self.timeline_slider.setValue(0)
+        self.current_time_label.setText("00:00:00")
+        self.total_time_label.setText("00:00:00")
+
         # Write first frame immediately so the file duration tracks wall-clock.
         try:
             self.recording_writer.write(frame)
+            self._log_recorded_frame_timestamp(0.0)
+            self._update_recording_timeline()
             self.update_preview(frame)
             self.log_message("Recording Started.")
             self._recording_started_logged = True
@@ -1963,6 +2653,12 @@ class VideoWindow(QMainWindow):
             try:
                 if getattr(self, 'recording_writer', None):
                     self.recording_writer.write(lf)
+                    base_t = getattr(self, '_record_start_perf', None)
+                    if base_t is not None:
+                        elapsed_ms = (time.perf_counter() - float(base_t)) * 1000.0
+                    else:
+                        elapsed_ms = 0.0
+                    self._log_recorded_frame_timestamp(elapsed_ms)
                 if not getattr(self, '_recording_started_logged', False):
                     self.log_message("Recording Started.")
                     self._recording_started_logged = True
@@ -1972,14 +2668,50 @@ class VideoWindow(QMainWindow):
             self._record_next_write_t += getattr(self, '_record_frame_interval', 1.0 / 30.0)
             loops += 1
 
+        # Keep timeline end time growing until recording finishes.
+        if loops > 0:
+            self._update_recording_timeline()
+
     def stop_recording(self):
         """Stop recording"""
         if not getattr(self, 'is_recording', False):
             return
 
+        serial_csv_path = getattr(self, 'serial_csv_path', None)
+        imu_count = 0
+        imu_last_ms = None
+        try:
+            if self._serial_reader is not None:
+                imu_count, imu_last_ms = self._serial_reader.get_logging_stats()
+        except Exception:
+            imu_count, imu_last_ms = 0, None
+
+        frame_count = int(getattr(self, '_record_frame_index', 0))
+        frame_last_ms = float(getattr(self, '_record_last_frame_ts_ms', 0.0)) if frame_count > 0 else None
+
         # Stop serial logging first (requested: only between Start/End Recording)
         try:
             self._stop_serial_capture(stop_reader=not getattr(self, 'serial_monitor_visible', False))
+        except Exception:
+            pass
+
+        # Post-align IMU CSV duration to frame duration (first timestamp stays 0 ms).
+        try:
+            aligned_count, aligned_last_ms, changed = self._align_imu_csv_duration(serial_csv_path, frame_last_ms)
+            if aligned_count > 0 and aligned_last_ms is not None:
+                imu_count = aligned_count
+                imu_last_ms = aligned_last_ms
+                if changed:
+                    self.log_message(
+                        f"IMU duration aligned to frame duration: imu_end={imu_last_ms:.1f} ms, "
+                        f"frame_end={float(frame_last_ms):.1f} ms"
+                    )
+        except Exception:
+            pass
+
+        # Stop frame timestamp logging for this recording.
+        try:
+            self._stop_frame_timestamp_logging()
         except Exception:
             pass
 
@@ -2012,8 +2744,49 @@ class VideoWindow(QMainWindow):
         self.stop_record_btn.setEnabled(False)
         self.start_record_btn.setText("Start Recording")
 
+        # Move recording files to Raw-Data subfolder
+        try:
+            if hasattr(self, 'recording_file_path') and self.recording_file_path:
+                rec_path = Path(self.recording_file_path)
+                session = rec_path.parent
+                raw_data_dir = session / "Raw-Data"
+                raw_data_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Move Recording.mp4
+                if rec_path.exists():
+                    new_rec_path = raw_data_dir / rec_path.name
+                    shutil.move(str(rec_path), str(new_rec_path))
+                    self.recording_file_path = str(new_rec_path)
+                
+                # Move FrameTimestamp.csv
+                frame_csv = session / "FrameTimestamp.csv"
+                if frame_csv.exists():
+                    shutil.move(str(frame_csv), str(raw_data_dir / "FrameTimestamp.csv"))
+                
+                # Move IMUTimeStamp.csv
+                imu_csv = session / "IMUTimeStamp.csv"
+                if imu_csv.exists():
+                    shutil.move(str(imu_csv), str(raw_data_dir / "IMUTimeStamp.csv"))
+                
+                self.log_message(f"Recording files moved to {raw_data_dir.name}/")
+        except Exception as e:
+            self.log_message(f"Warning: Could not move recording files: {e}")
+
         # Log
         self.log_message("Recording Ended.")
+
+        if frame_last_ms is not None and imu_last_ms is not None:
+            delta_ms = abs(float(frame_last_ms) - float(imu_last_ms))
+            self.log_message(
+                f"Sync summary: frames={frame_count}, frame_end={frame_last_ms:.1f} ms; "
+                f"imu_rows={imu_count}, imu_end={float(imu_last_ms):.1f} ms; delta={delta_ms:.1f} ms"
+            )
+        elif frame_last_ms is not None:
+            self.log_message(
+                f"Sync summary: frames={frame_count}, frame_end={frame_last_ms:.1f} ms; "
+                f"IMU rows={imu_count}"
+            )
+
         if hasattr(self, 'recording_file_path'):
             # Automatically load the new recording for segment creation
             self.load_video_from_path(self.recording_file_path)
