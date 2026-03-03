@@ -33,6 +33,17 @@ class UserDatabase:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (username) REFERENCES users (username)
+            )
+            """
+        )
         self._conn.commit()
 
     def _hash_password(self, password: str, salt_hex: str) -> str:
@@ -72,6 +83,7 @@ class UserDatabase:
             raise PermissionError("Invalid admin password")
         with self._conn:
             self._conn.execute("DROP TABLE IF EXISTS users")
+            self._conn.execute("DROP TABLE IF EXISTS password_reset_tokens")
             self._conn.execute(
                 """
                 CREATE TABLE users (
@@ -80,6 +92,17 @@ class UserDatabase:
                     salt TEXT NOT NULL,
                     pwd_hash TEXT NOT NULL,
                     email TEXT
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE password_reset_tokens (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    token TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (username) REFERENCES users (username)
                 )
                 """
             )
@@ -126,6 +149,56 @@ class UserDatabase:
     def ensure_admin(self, username: str = "admin", password: str = "secret", email: str = "admin@example.com") -> None:
         if not self.username_exists(username):
             self.create_user(username, password, email)
+
+    # --- Password Reset Token Management ------------------------------------------------
+    def generate_reset_token(self, username: str) -> Optional[str]:
+        """Generate a password reset token for a user. Returns token or None."""
+        if not self.username_exists(username):
+            return None
+        # Generate a secure random token
+        token = secrets.token_urlsafe(32)
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO password_reset_tokens (username, token) VALUES (?, ?)",
+                    (username, token)
+                )
+            return token
+        except sqlite3.IntegrityError:
+            return None
+
+    def verify_reset_token(self, token: str) -> Optional[str]:
+        """Verify a reset token and return the username if valid, else None."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT username FROM password_reset_tokens WHERE token = ?", (token,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def reset_password_with_token(self, token: str, new_password: str) -> bool:
+        """Reset a user's password using a valid token. Returns True on success."""
+        username = self.verify_reset_token(token)
+        if not username:
+            return False
+        # Generate new salt and hash
+        salt = secrets.token_hex(16)
+        pwd_hash = self._hash_password(new_password, salt)
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE users SET salt = ?, pwd_hash = ? WHERE username = ?",
+                    (salt, pwd_hash, username)
+                )
+                self._conn.execute("DELETE FROM password_reset_tokens WHERE token = ?", (token,))
+            return True
+        except sqlite3.Error:
+            return False
+
+    def get_user_by_email(self, email: str) -> Optional[str]:
+        """Get username by email. Returns username or None."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT username FROM users WHERE email = ?", (email.strip(),))
+        row = cur.fetchone()
+        return row[0] if row else None
 
     def close(self) -> None:
         self._conn.close()

@@ -408,11 +408,15 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
             return
         if DB.verify_user(user, pwd):
             QMessageBox.information(self, "Success", f"Welcome, {user}!")
-            self.login_successful.emit()  # optional
-            # Open the video window with the same geometry/state
-            self.video_window = VideoWindow()
-            # transition smoothly
-            self.transition_to(self.video_window)
+            self.login_successful.emit()  # optional signal for other listeners
+
+            # After login we now show the patient profile manager instead of
+            # the surgical video interface.  Import locally to avoid circular
+            # dependencies and keep startup cost minimal.
+            from patient_profile import PatientProfileWindow
+
+            self.patient_window = PatientProfileWindow()
+            self.transition_to(self.patient_window)
         else:
             QMessageBox.warning(self, "Login failed", "Invalid username or password.")
             self.password.clear()
@@ -428,10 +432,15 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         QTimer.singleShot(100, lambda: self.close())
 
     def _show_recover_password(self, href: str):
-        from ui_windows import RecoverPasswordWindow
-        # set parent to main login window (self.parent_window) so returning does not exit app
-        recover = RecoverPasswordWindow(parent=self.parent_window)
-        self.transition_to(recover)
+        try:
+            from ui_windows import RecoverPasswordWindow
+            # keep a reference so the window isn't garbage-collected
+            self.recover_window = RecoverPasswordWindow(parent=self.parent_window)
+            self.transition_to(self.recover_window)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Failed to open password recovery window: {e}")
 
 class CreateAccountWindow(QWidget, CenteredWidgetMixin):
     def __init__(self, parent=None):
@@ -461,12 +470,13 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
 
         # ---- Form Layout (centered rows) ----
         # We'll build rows (HBox) and center each row so all inputs appear centered
-        def row(label_widget: QLabel, input_widget: QLineEdit, warning: QLabel | None = None, label_w: int = 110, input_w: int = 225, warning_w: int = 160):
+        def row(label_widget: QLabel, input_widget: QLineEdit, warning: QLabel | None = None, label_w: int = 160, input_w: int = 225, warning_w: int = 160):
             # Build a 3-column row: left (label), center (input fixed width), right (warning).
             # The center column has fixed width and is centered by the left/right expanding columns.
             label_widget.setFixedWidth(label_w)
             input_widget.setFixedWidth(input_w)
             label_widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            label_widget.setWordWrap(True)
 
             # left area: contains the label, right-aligned
             left = QWidget()
@@ -534,6 +544,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.password_warning = QLabel("")
         self.password_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.password_warning.setWordWrap(True)
         self.password_input.textChanged.connect(self._validate_password)
         main_layout.addWidget(row(password_label, self.password_input, self.password_warning))
 
@@ -544,6 +555,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.confirm_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.confirm_warning = QLabel("")
         self.confirm_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.confirm_warning.setWordWrap(True)
         self.confirm_input.textChanged.connect(self._validate_confirm)
         main_layout.addWidget(row(confirm_label, self.confirm_input, self.confirm_warning))
 
@@ -686,29 +698,181 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
 class RecoverPasswordWindow(QWidget, CenteredWidgetMixin):
     def __init__(self, parent=None):
         super().__init__()
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
         self.parent_window = parent
         self.setWindowTitle("Recover Password")
-        self.restore_geometry_if_available()
-        self._build_ui()
+        self.setMinimumSize(500, 300)
+        try:
+            self.restore_geometry_if_available()
+        except Exception:
+            pass
+        try:
+            self._build_ui()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._show_error_layout(str(e))
+
+    def _show_error_layout(self, error_msg):
+        """Show an error message when UI fails to build."""
+        try:
+            error_label = QLabel(f"Error loading window:\n\n{error_msg}")
+            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            error_label.setWordWrap(True)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(self.close)
+            
+            layout = QVBoxLayout()
+            layout.addWidget(error_label)
+            layout.addWidget(close_btn)
+            
+            self.setLayout(layout)
+            self.setMinimumSize(400, 200)
+        except Exception as e2:
+            self.close()
 
     def closeEvent(self, event):
         self.save_geometry_on_close()
         super().closeEvent(event)
 
     def _build_ui(self):
-        label = QLabel("Recover Password Placeholder")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout = QVBoxLayout()
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        back_button = QPushButton("Back to Main Login")
-        back_button.clicked.connect(self._back_to_main)
-        back_button.setFixedSize(200, 40)
+        # Title
+        title = QLabel("Recover Password")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        main_layout.addWidget(title)
+        main_layout.addSpacing(10)
 
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
-        layout.addWidget(back_button)
+        # Instructions
+        instructions = QLabel("Enter your email or username to receive a password reset link")
+        instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("font-size: 12px; color: #c0c0c0;")
+        main_layout.addWidget(instructions)
+        main_layout.addSpacing(15)
 
-        self.setLayout(self.create_centered_wrapper(layout))
+        # Email/Username input
+        label = QLabel("Email or Username:")
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText("Enter your email or username")
+        self.input_field.setFixedWidth(300)
+
+        self.input_warning = QLabel("")
+        self.input_warning.setStyleSheet("color: red; font-size: 12px;")
+
+        def make_row(label_widget: QLabel, input_widget: QLineEdit, warning: QLabel | None = None):
+            label_widget.setFixedWidth(160)
+            input_widget.setFixedWidth(225)
+            label_widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            label_widget.setWordWrap(True)
+
+            left = QWidget()
+            left_l = QHBoxLayout()
+            left_l.setContentsMargins(0, 0, 0, 0)
+            left_l.addWidget(label_widget, 0, Qt.AlignmentFlag.AlignRight)
+            left.setLayout(left_l)
+
+            center = QWidget()
+            center_l = QHBoxLayout()
+            center_l.setContentsMargins(0, 0, 0, 0)
+            center_l.addWidget(input_widget, 0, Qt.AlignmentFlag.AlignCenter)
+            center.setLayout(center_l)
+            center.setFixedWidth(225)
+
+            right = QWidget()
+            right_l = QHBoxLayout()
+            right_l.setContentsMargins(0, 0, 0, 0)
+            if warning:
+                warning.setFixedWidth(160)
+                warning.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                right_l.addWidget(warning)
+            right_l.addStretch()
+            right.setLayout(right_l)
+
+            row_h = QHBoxLayout()
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.addWidget(left, 1)
+            row_h.addWidget(center, 0)
+            row_h.addWidget(right, 1)
+
+            container = QWidget()
+            container.setLayout(row_h)
+            return container
+
+        main_layout.addWidget(make_row(label, self.input_field, self.input_warning))
+        main_layout.addSpacing(20)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        send_btn = AnimatedButton("Send Recovery Link")
+        send_btn.setFixedSize(180, 40)
+        send_btn.clicked.connect(self.send_recovery_link)
+
+        cancel_btn = AnimatedButton("Cancel")
+        cancel_btn.setFixedSize(100, 40)
+        cancel_btn.clicked.connect(self._back_to_main)
+
+        btn_layout.addWidget(send_btn)
+        btn_layout.addSpacing(20)
+        btn_layout.addWidget(cancel_btn)
+        main_layout.addLayout(btn_layout)
+
+        # Wrap in centered content widget
+        content = QWidget()
+        content.setLayout(main_layout)
+        content.setMinimumWidth(640)
+        content.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        outer = QHBoxLayout()
+        outer.addStretch()
+        outer.addWidget(content)
+        outer.addStretch()
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setLayout(outer)
+
+    def send_recovery_link(self):
+        """Handle the password recovery request."""
+        try:
+            input_value = self.input_field.text().strip()
+            
+            if not input_value:
+                self.input_warning.setText("Please enter email or username")
+                return
+
+            # Try to find user by username or email
+            username = None
+            
+            if input_value.count('@') > 0:  # Likely an email
+                username = DB.get_user_by_email(input_value)
+                if not username:
+                    self.input_warning.setText("No account found with this email")
+                    return
+            else:  # Treat as username
+                if DB.username_exists(input_value):
+                    username = input_value
+                else:
+                    self.input_warning.setText("Username not found")
+                    return
+
+            # Generate reset token
+            reset_token = DB.generate_reset_token(username)
+            if not reset_token:
+                self.input_warning.setText("Error generating reset token")
+                return
+
+            # Show the reset token window with the token
+            from ui_windows import ResetPasswordWindow
+            self.reset_window = ResetPasswordWindow(reset_token, parent=self.parent_window)
+            self.transition_to(self.reset_window)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.input_warning.setText(f"Error: {str(e)[:50]}")
 
     def _back_to_main(self):
         self.save_geometry_on_close()
@@ -718,4 +882,262 @@ class RecoverPasswordWindow(QWidget, CenteredWidgetMixin):
                 self.parent_window.apply_geometry_from(self)
             except Exception:
                 pass
-            self.parent_window.show()
+            try:
+                self.parent_window.show()
+                self.parent_window.raise_()
+                self.parent_window.activateWindow()
+            except Exception:
+                pass
+        else:
+            pass
+
+
+class ResetPasswordWindow(QWidget, CenteredWidgetMixin):
+    """Window for resetting password using a valid reset token."""
+    def __init__(self, reset_token: str, parent=None):
+        super().__init__()
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
+        self.reset_token = reset_token
+        self.parent_window = parent
+        self.setWindowTitle("Reset Password")
+        self.setMinimumSize(500, 400)
+        try:
+            self.restore_geometry_if_available()
+        except Exception:
+            pass
+        try:
+            self._build_ui()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._show_error_layout(str(e))
+
+    def _show_error_layout(self, error_msg):
+        """Show an error message when UI fails to build."""
+        try:
+            error_label = QLabel(f"Error loading window:\n\n{error_msg}")
+            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            error_label.setWordWrap(True)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(self.close)
+            
+            layout = QVBoxLayout()
+            layout.addWidget(error_label)
+            layout.addWidget(close_btn)
+            
+            self.setLayout(layout)
+            self.setMinimumSize(400, 200)
+        except Exception as e2:
+            self.close()
+
+    def closeEvent(self, event):
+        self.save_geometry_on_close()
+        super().closeEvent(event)
+        # When closing the reset window, return to the login window
+        if self.parent_window:
+            try:
+                self.parent_window.apply_geometry_from(self)
+            except Exception:
+                pass
+            try:
+                self.parent_window.show()
+                self.parent_window.raise_()
+                self.parent_window.activateWindow()
+            except Exception:
+                pass
+        else:
+            try:
+                main_login = MainLoginWindow()
+                main_login.show()
+            except Exception:
+                pass
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout()
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Title
+        title = QLabel("Reset Your Password")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        main_layout.addWidget(title)
+        main_layout.addSpacing(10)
+
+        # Instructions
+        instructions = QLabel("Enter your new password below")
+        instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instructions.setStyleSheet("font-size: 12px; color: #c0c0c0;")
+        main_layout.addWidget(instructions)
+        main_layout.addSpacing(15)
+
+        def make_row(label_widget: QLabel, input_widget: QLineEdit, warning: QLabel | None = None, input_w: int = 225):
+            label_widget.setFixedWidth(160)
+            input_widget.setFixedWidth(input_w)
+            label_widget.setAlignment(Qt.AlignmentFlag.AlignRight)
+            label_widget.setWordWrap(True)
+
+            left = QWidget()
+            left_l = QHBoxLayout()
+            left_l.setContentsMargins(0, 0, 0, 0)
+            left_l.addWidget(label_widget, 0, Qt.AlignmentFlag.AlignRight)
+            left.setLayout(left_l)
+
+            center = QWidget()
+            center_l = QHBoxLayout()
+            center_l.setContentsMargins(0, 0, 0, 0)
+            center_l.addWidget(input_widget, 0, Qt.AlignmentFlag.AlignCenter)
+            center.setLayout(center_l)
+            center.setFixedWidth(input_w)
+
+            right = QWidget()
+            right_l = QHBoxLayout()
+            right_l.setContentsMargins(0, 0, 0, 0)
+            if warning:
+                warning.setFixedWidth(160)
+                warning.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                right_l.addWidget(warning)
+            right_l.addStretch()
+            right.setLayout(right_l)
+
+            row_h = QHBoxLayout()
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.addWidget(left, 1)
+            row_h.addWidget(center, 0)
+            row_h.addWidget(right, 1)
+
+            container = QWidget()
+            container.setLayout(row_h)
+            return container
+
+        # New Password
+        password_label = QLabel("New Password:")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Enter new password")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.password_warning = QLabel("")
+        self.password_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.password_warning.setWordWrap(True)
+        self.password_input.textChanged.connect(self._validate_password)
+        main_layout.addWidget(make_row(password_label, self.password_input, self.password_warning, input_w=225))
+
+        # Confirm Password
+        confirm_label = QLabel("Confirm Password:")
+        self.confirm_input = QLineEdit()
+        self.confirm_input.setPlaceholderText("Confirm new password")
+        self.confirm_input.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.confirm_warning = QLabel("")
+        self.confirm_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.confirm_warning.setWordWrap(True)
+        self.confirm_input.textChanged.connect(self._validate_confirm)
+        main_layout.addWidget(make_row(confirm_label, self.confirm_input, self.confirm_warning, input_w=225))
+
+        # Password requirements
+        self.pwd_req_label = QLabel(
+            "Password Requirements:\n"
+            "• At least 10 characters\n"
+            "• One uppercase letter\n"
+            "• One lowercase letter\n"
+            "• One number\n"
+            "• One special character (!, @, #, $, %, ^, &, *)"
+        )
+        self.pwd_req_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pwd_req_label.setStyleSheet("font-size: 12px; color: gray;")
+        main_layout.addWidget(self.pwd_req_label)
+        main_layout.addSpacing(15)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        reset_btn = AnimatedButton("Reset Password")
+        reset_btn.setFixedSize(180, 40)
+        reset_btn.clicked.connect(self.reset_password)
+
+        cancel_btn = AnimatedButton("Cancel")
+        cancel_btn.setFixedSize(100, 40)
+        cancel_btn.clicked.connect(self._back_to_main)
+
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addSpacing(20)
+        btn_layout.addWidget(cancel_btn)
+        main_layout.addLayout(btn_layout)
+
+        # Wrap in centered content widget
+        content = QWidget()
+        content.setLayout(main_layout)
+        content.setFixedWidth(640)
+        content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        outer = QHBoxLayout()
+        outer.addStretch()
+        outer.addWidget(content)
+        outer.addStretch()
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setLayout(outer)
+
+    def _validate_password(self):
+        pwd = self.password_input.text()
+        palette = self.password_input.palette()
+        if password_ok(pwd):
+            palette.setColor(QPalette.ColorRole.Base, QColor("white"))
+            self.password_warning.setText("")
+        else:
+            palette.setColor(QPalette.ColorRole.Base, QColor("#FFCCCC"))
+            self.password_warning.setText("Password does not meet requirements")
+        self.password_input.setPalette(palette)
+        self._validate_confirm()
+
+    def _validate_confirm(self):
+        pwd = self.password_input.text()
+        confirm = self.confirm_input.text()
+        palette = self.confirm_input.palette()
+        if confirm == pwd or confirm == "":
+            palette.setColor(QPalette.ColorRole.Base, QColor("white"))
+            self.confirm_warning.setText("")
+        else:
+            palette.setColor(QPalette.ColorRole.Base, QColor("#FFCCCC"))
+            self.confirm_warning.setText("Passwords do not match")
+        self.confirm_input.setPalette(palette)
+
+    def reset_password(self):
+        """Reset the password using the token."""
+        if not password_ok(self.password_input.text()):
+            QMessageBox.warning(self, "Error", "Password does not meet the requirements!")
+            return
+        if self.password_input.text() != self.confirm_input.text():
+            QMessageBox.warning(self, "Error", "Passwords do not match!")
+            return
+
+        new_password = self.password_input.text()
+        
+        # Try to reset password with the token
+        if DB.reset_password_with_token(self.reset_token, new_password):
+            QMessageBox.information(self, "Success", "Password reset successfully! You can now log in with your new password.")
+            # Go back to main login
+            self._go_to_main_login()
+        else:
+            QMessageBox.warning(self, "Error", "Invalid or expired reset token. Please try again.")
+            self._back_to_main()
+
+    def _back_to_main(self):
+        self.save_geometry_on_close()
+        self.close()
+        if self.parent_window:
+            try:
+                self.parent_window.apply_geometry_from(self)
+            except Exception:
+                pass
+            try:
+                self.parent_window.show()
+                self.parent_window.raise_()
+                self.parent_window.activateWindow()
+            except Exception:
+                pass
+        else:
+            pass
+
+    def _go_to_main_login(self):
+        """Navigate back to the main login window."""
+        self.save_geometry_on_close()
+        main_login = MainLoginWindow()
+        self.transition_to(main_login)

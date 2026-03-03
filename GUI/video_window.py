@@ -1,11 +1,10 @@
 """
 Video capture window: select camera, start live preview+recording, stop, export frames.
 """
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 import cv2
 from datetime import datetime
-from typing import List
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -774,10 +773,23 @@ class SerialPortReader:
             self._maybe_log_line(line)
 
 class VideoWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, patient_id: str = None, patient_db=None):
         super().__init__()
-        self.setWindowTitle("Surgical Imaging Interface")
+        # Set window title with patient info if available
+        if patient_id and patient_db:
+            try:
+                current_patient = patient_db.load_patient(patient_id)
+                patient_display = current_patient.get_display_name() if current_patient else f"Patient {patient_id[:8]}"
+                self.setWindowTitle(f"Surgical Imaging Interface - {patient_display}")
+            except Exception:
+                self.setWindowTitle("Surgical Imaging Interface")
+        else:
+            self.setWindowTitle("Surgical Imaging Interface")
         self.resize(1000, 600)
+
+        # Patient context (if provided from patient profile manager)
+        self.patient_id: Optional[str] = patient_id
+        self.patient_db = patient_db
 
         # Data session (Data/<Session>/...)
         self.session_name: str = ""
@@ -881,6 +893,9 @@ class VideoWindow(QMainWindow):
         """)
         side_layout = QVBoxLayout(side_panel)
 
+        # Patient info section (if opened from patient profile)
+        # No longer displayed - patient context is shown in window title
+        
         self.load_button = QPushButton("Load Video")
         self.load_button.clicked.connect(self.load_video_file)
         side_layout.addWidget(self.load_button)
@@ -1022,6 +1037,14 @@ class VideoWindow(QMainWindow):
 
         # Add spacer to push terminal to bottom
         side_layout.addStretch(1)
+
+        # Back to Patient Profile button (only if opened from patient profile)
+        if self.patient_id:
+            self.back_to_patient_btn = QPushButton("Back to Patient Profile")
+            self.back_to_patient_btn.setFixedHeight(40)
+            self.back_to_patient_btn.clicked.connect(self.return_to_patient)
+            side_layout.addWidget(self.back_to_patient_btn)
+            self.update_back_to_patient_state(True)
         
         # Terminal section at bottom - fixed position
         terminal_label = QLabel("Terminal")
@@ -1242,10 +1265,104 @@ class VideoWindow(QMainWindow):
         # Disable recording and segments on startup
         self.set_recording_enabled(False)
         self.set_segments_enabled(False)
+        
+        # Auto-load patient video if available
+        if self.patient_id and self.patient_db:
+            self._auto_load_patient_video()
 
     def pause_video(self):
         if self.timer.isActive():
             self.timer.stop()
+
+    def _auto_load_patient_video(self):
+        """Auto-load the most recent video associated with the patient."""
+        if not self.patient_id or not self.patient_db:
+            return
+        try:
+            patient = self.patient_db.load_patient(self.patient_id)
+            if patient and patient.associated_videos:
+                # Get the most recent video (last in the list)
+                video_path = patient.associated_videos[-1]
+                video_file = Path(video_path)
+                
+                # Check if the file exists
+                if video_file.exists():
+                    self.terminal_log(f"Auto-loading patient video: {video_file.name}")
+                    self.load_video_from_path(str(video_path))
+                else:
+                    self.terminal_log(f"Patient video file not found: {video_path}")
+        except Exception as e:
+            self.terminal_log(f"Error auto-loading patient video: {e}")
+
+    def link_recording_to_patient(self, video_path: str) -> bool:
+        """Link a recorded video to the current patient profile."""
+        if not self.patient_id or not self.patient_db:
+            return False
+        try:
+            patient = self.patient_db.load_patient(self.patient_id)
+            if patient:
+                if video_path not in patient.associated_videos:
+                    patient.associated_videos.append(video_path)
+                    self.patient_db.save_patient(patient)
+                    self.terminal_log(f"Video linked to patient: {patient.get_display_name()}")
+                return True
+        except Exception as e:
+            self.terminal_log(f"Error linking video to patient: {e}")
+        return False
+
+    def _link_extracted_frames_to_patient(self):
+        """Link all extracted frame directories to the patient profile."""
+        if not self.patient_id or not self.patient_db:
+            return
+        try:
+            patient = self.patient_db.load_patient(self.patient_id)
+            if not patient:
+                return
+            
+            # Get the patient's media directory
+            patient_media_dir = self._get_patient_media_dir()
+            if not patient_media_dir:
+                return
+            
+            # Link all extracted frame directories as images
+            frames_base = patient_media_dir / "Extracted_Frames"
+            if frames_base.exists():
+                for segment_dir in frames_base.iterdir():
+                    if segment_dir.is_dir():
+                        # Add the directory path to associated_images
+                        dir_path = str(segment_dir)
+                        if dir_path not in patient.associated_images:
+                            patient.associated_images.append(dir_path)
+                            self.terminal_log(f"Linked extracted frames to patient: {segment_dir.name}")
+            
+            # Save the updated patient profile
+            self.patient_db.save_patient(patient)
+            self.terminal_log(f"Extracted frames saved to patient profile")
+        except Exception as e:
+            self.terminal_log(f"Error linking extracted frames to patient: {e}")
+
+    def return_to_patient(self):
+        """Return to the patient profile manager window."""
+        if self.patient_id and self.patient_db:
+            try:
+                from patient_profile import PatientProfileWindow
+                self.patient_window = PatientProfileWindow()
+                self.patient_window.show()
+                geo = self.geometry()
+                self.patient_window.setGeometry(geo.x(), geo.y(), geo.width(), geo.height())
+                self.close()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to return to patient profile: {e}")
+        else:
+            self.close()
+
+    def terminal_log(self, message: str):
+        """Append a message to the terminal display."""
+        cursor = self.terminal_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(message + "\n")
+        self.terminal_display.setTextCursor(cursor)
+        self.terminal_display.ensureCursorVisible()
 
     def closeEvent(self, event):
         # Ensure serial thread/file handles are stopped
@@ -1299,12 +1416,18 @@ class VideoWindow(QMainWindow):
             self.load_button.setEnabled(True)
             self.update_view_frames_button_state(True)  # Enable view frames button
             self.update_extract_button_state(False)  # Disable extract button after completion
+            self.update_back_to_patient_state(True)  # Re-enable back button when extraction completes
             # Keep reconstruction button enabled
             # Collapse the extract widget
             self.extract_collapsed = True
             self.extract_content.setVisible(False)
             self.extract_button.setText("Extract Frames")
             self.log_message("Frame extraction finished")
+            
+            # Link extracted frames to patient profile if patient is set
+            if self.patient_id and self.patient_db:
+                self._link_extracted_frames_to_patient()
+            
             QMessageBox.information(self, "Done", "All segments have been extracted.")
     
     def log_frame_selection_change(self, segment_name, selected_count, total_count):
@@ -1313,6 +1436,17 @@ class VideoWindow(QMainWindow):
 
     def _segment_frames_output_dir(self, seg: dict) -> str:
         """Return folder path where extracted frames for a segment are stored."""
+        # If patient is set, save frames to patient media directory
+        if self.patient_id:
+            patient_media_dir = self._get_patient_media_dir()
+            if patient_media_dir:
+                name = str(seg.get("name", "segment")).strip() or "segment"
+                safe_name = _sanitize_filename_component(name.replace(" ", "_")) or "segment"
+                frames_dir = patient_media_dir / "Extracted_Frames" / safe_name
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                return str(frames_dir)
+        
+        # Otherwise, use session directory (default behavior)
         session_dir = self._get_session_dir()
         # Use clean segment name for Output-Data folder
         name = str(seg.get("name", "segment")).strip() or "segment"
@@ -1364,6 +1498,18 @@ class VideoWindow(QMainWindow):
         self.session_dir.mkdir(parents=True, exist_ok=True)
         return self.session_dir
 
+    def _get_patient_media_dir(self) -> Optional[Path]:
+        """Get or create the media directory for the current patient."""
+        if not self.patient_id or not self.patient_db:
+            return None
+        try:
+            patient_media_dir = DATA_DIR / f"Patient_{self.patient_id[:12]}" / "Media"
+            patient_media_dir.mkdir(parents=True, exist_ok=True)
+            return patient_media_dir
+        except Exception as e:
+            self.terminal_log(f"Error creating patient media directory: {e}")
+            return None
+
     def open_frame_browser(self):
         from frame_browser import FrameBrowser
         if not self.video_path:
@@ -1405,6 +1551,7 @@ class VideoWindow(QMainWindow):
         self.progress.setVisible(True)
         # Enable reconstruction button when extraction starts
         self.update_reconstruct_button_state(True)
+        self.update_back_to_patient_state(False)  # Disable back button during extraction
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.segment_progress.clear()
@@ -1441,10 +1588,43 @@ class VideoWindow(QMainWindow):
             self.load_video_from_path(file_name)
 
     def load_video_from_path(self, file_name):
-        # Load a video file path into the player (shared by file dialog and auto-load)
-        self.video_path = file_name
-        self.current_video_id = os.path.abspath(file_name)
-        self.cap = cv2.VideoCapture(file_name)
+        # If patient is set, copy video to patient media directory and link it
+        # (but skip if already in patient media to avoid file lock issues)
+        actual_video_path = file_name
+        video_to_load = file_name
+        
+        if self.patient_id and self.patient_db:
+            patient_media_dir = self._get_patient_media_dir()
+            if patient_media_dir:
+                try:
+                    import shutil
+                    video_filename = Path(file_name).name
+                    patient_video_path = patient_media_dir / video_filename
+                    
+                    # Only copy if not already in patient media directory
+                    file_path = Path(file_name).resolve()
+                    patient_video_resolved = patient_video_path.resolve()
+                    
+                    if file_path != patient_video_resolved and not patient_video_path.exists():
+                        # Copy video to patient's media directory
+                        shutil.copy2(file_name, str(patient_video_path))
+                        self.terminal_log(f"Video saved to patient media: {video_filename}")
+                        video_to_load = str(patient_video_path)
+                    elif patient_video_path.exists():
+                        # Already in patient media, just link it
+                        self.terminal_log(f"Video already in patient media: {video_filename}")
+                        video_to_load = str(patient_video_path)
+                    
+                    # Link to patient profile
+                    self.link_recording_to_patient(str(patient_video_path))
+                except Exception as e:
+                    self.terminal_log(f"Warning: Could not save video to patient media: {e}")
+        
+        # Use the patient media copy if available, otherwise use original
+        self.video_path = video_to_load
+        self.current_video_id = os.path.abspath(video_to_load)
+        
+        self.cap = cv2.VideoCapture(video_to_load)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = float(self.cap.get(cv2.CAP_PROP_FPS))
         if not fps or fps < 1:
@@ -1601,6 +1781,42 @@ class VideoWindow(QMainWindow):
                 }
             """)
     
+    def update_back_to_patient_state(self, enabled):
+        """Update back to patient button state and styling"""
+        if not hasattr(self, 'back_to_patient_btn'):
+            return
+        self.back_to_patient_btn.setEnabled(enabled)
+        if enabled:
+            # Normal button styling - black text
+            self.back_to_patient_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #000000;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+                QPushButton:pressed {
+                    background-color: #b0b0b0;
+                }
+            """)
+        else:
+            # Disabled styling - darker grey text
+            self.back_to_patient_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #c0c0c0;
+                    color: #808080;
+                    border: 1px solid #a0a0a0;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: bold;
+                }
+            """)
+    
     def log_message(self, message):
         """Add timestamped message to terminal"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1735,6 +1951,7 @@ class VideoWindow(QMainWindow):
         self.extract_button.setText("Extract Frames")
         self.log_message("Frame extraction cancelled")
         self.cancel_button.setVisible(False)
+        self.update_back_to_patient_state(True)  # Re-enable back button when extraction cancelled
 
     def start_reconstruction(self):
         # Save current geometry before transitioning
@@ -2601,6 +2818,7 @@ class VideoWindow(QMainWindow):
         self.start_record_btn.setEnabled(False)
         self.stop_record_btn.setEnabled(True)
         self.start_record_btn.setText("Recording...")
+        self.update_back_to_patient_state(False)  # Disable back button during recording
 
         # Prepare timeline to grow with recording duration.
         self.timeline_slider.setEnabled(True)
@@ -2743,6 +2961,7 @@ class VideoWindow(QMainWindow):
         self.start_record_btn.setEnabled(True)
         self.stop_record_btn.setEnabled(False)
         self.start_record_btn.setText("Start Recording")
+        self.update_back_to_patient_state(True)  # Re-enable back button when recording stops)
 
         # Move recording files to Raw-Data subfolder
         try:
