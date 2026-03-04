@@ -1423,6 +1423,107 @@
           "modified": false
         }
       }
+    },
+    "c:\\Users\\bgdiv\\OneDrive\\Documents\\McMaster_University\\5th_Year\\IBEHS_5P06\\Code\\LeEndoscope\\Data\\Patient_20260304_132\\Media\\Recording.mp4": {
+      "c:\\Users\\bgdiv\\OneDrive\\Documents\\McMaster_University\\5th_Year\\IBEHS_5P06\\Code\\LeEndoscope\\Data\\Patient_20260304_132\\Media\\Extracted_Frames\\Seg1": {},
+      "c:\\Users\\bgdiv\\OneDrive\\Documents\\McMaster_University\\5th_Year\\IBEHS_5P06\\Code\\LeEndoscope\\Data\\Patient_20260304_132\\Test1.1_20260304_141039\\Output-Data\\Extracted_Frames\\Seg1": {
+        "Frame1.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame10.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame11.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame12.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame13.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame14.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame15.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame16.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame17.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame18.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame19.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame2.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame20.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame21.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame22.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame23.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame24.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame3.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame4.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame5.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame6.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame7.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame8.png": {
+          "checked": true,
+          "modified": false
+        },
+        "Frame9.png": {
+          "checked": false,
+          "modified": true
+        }
+      }
     }
   }
 }
