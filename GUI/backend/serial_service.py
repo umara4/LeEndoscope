@@ -170,7 +170,7 @@ class SerialPortReader:
         if "," not in line:
             return
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 8:
+        if len(parts) < 11:
             return
 
         try:
@@ -198,7 +198,7 @@ class SerialPortReader:
             if self._log_fp is None:
                 return
             try:
-                self._log_fp.write(",".join(parts[:8]) + "\n")
+                self._log_fp.write(",".join(parts[:11]) + "\n")
                 self._log_fp.flush()
             except Exception:
                 pass

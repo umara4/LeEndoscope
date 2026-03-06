@@ -29,7 +29,7 @@ from typing import Optional
 import cv2
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout,
-    QFileDialog, QMessageBox,
+    QFileDialog, QInputDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QTime, QEvent
 from PyQt6.QtGui import QTextCursor
@@ -238,10 +238,11 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
                 return
             if not self.session_dir:
                 return
-            session = Path(self.session_dir)
-            # Segment folders are directly in session dir (skip 'Raw Data')
-            for entry in session.iterdir():
-                if entry.is_dir() and entry.name != "Raw Data":
+            output_dir = Path(self.session_dir) / "Output Data"
+            if not output_dir.is_dir():
+                return
+            for entry in output_dir.iterdir():
+                if entry.is_dir():
                     dir_path = str(entry)
                     if dir_path not in patient.associated_images:
                         patient.associated_images.append(dir_path)
@@ -310,22 +311,152 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         return self.session_dir
 
     def _segment_frames_output_dir(self, seg: dict) -> str:
-        session_dir = self._get_session_dir()
+        if self.session_dir is not None:
+            session_dir = Path(self.session_dir)
+        else:
+            session_dir = self._get_session_dir()
+        output_dir = session_dir / "Output Data"
         name = str(seg.get("name", "segment")).strip() or "segment"
         safe = sanitize_filename_component(name.replace(" ", "_")) or "segment"
-        d = session_dir / safe
+        d = output_dir / safe
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
+
+    def _create_load_session_dir(self, session_name: str) -> Path:
+        """Create a session directory for loaded (non-recorded) data."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = sanitize_filename_component(session_name) or "Session"
+        safe = f"{base}-{timestamp}"
+        self.session_base_name = session_name
+        self.session_name = safe
+
+        patient_folder = self._patient_folder_name()
+        if patient_folder:
+            patient_dir = DATA_DIR / patient_folder
+            patient_dir.mkdir(parents=True, exist_ok=True)
+            session_dir = patient_dir / safe
+        else:
+            session_dir = DATA_DIR / safe
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
+
+    def _validate_imu_csv(self, csv_path: Path) -> bool:
+        """Validate that the selected CSV has the expected IMU format (11+ columns)."""
+        try:
+            with open(csv_path, "r", encoding="utf-8") as fp:
+                reader = csv.reader(fp)
+                header = next(reader, None)
+                if header is None:
+                    QMessageBox.warning(self, "Invalid IMU CSV", "The selected CSV file is empty.")
+                    return False
+
+                valid_rows = 0
+                for row in reader:
+                    if len(row) < 11:
+                        continue
+                    try:
+                        float(row[0].strip())
+                        [float(row[j].strip()) for j in range(1, 11)]
+                        valid_rows += 1
+                    except ValueError:
+                        continue
+                    if valid_rows >= 3:
+                        break
+
+                if valid_rows == 0:
+                    QMessageBox.warning(
+                        self, "Invalid IMU CSV",
+                        "The selected CSV does not contain valid IMU data.\n\n"
+                        "Expected format: 11 columns per row\n"
+                        "  timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z, A.X, A.Y, A.Z"
+                    )
+                    return False
+        except Exception as e:
+            QMessageBox.critical(self, "File Error", f"Cannot read CSV file:\n{e}")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Data loading and playback
     # ------------------------------------------------------------------
     def load_video_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "Select Data File", "", "Video Files (*.mp4 *.avi *.mov *.mkv)"
+        """Multi-step Load Data flow: pick mp4, pick IMU CSV, create session, copy files."""
+
+        # Step 1: Select video file
+        video_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Video File", "",
+            "Video Files (*.mp4 *.avi *.mov *.mkv)"
         )
-        if file_name:
-            self.load_video_from_path(file_name)
+        if not video_path:
+            return
+        video_path = Path(video_path)
+        video_dir = str(video_path.parent)
+
+        # Step 2: Select IMU CSV file
+        imu_path, _ = QFileDialog.getOpenFileName(
+            self, "Select IMU CSV File", video_dir,
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        if not imu_path:
+            return
+        imu_path = Path(imu_path)
+
+        # Step 3: Validate IMU CSV format
+        if not self._validate_imu_csv(imu_path):
+            return
+
+        # Step 4: Auto-detect FrameTimestamp.csv in same folder as IMU CSV
+        imu_dir = imu_path.parent
+        frame_ts_path = imu_dir / "FrameTimestamp.csv"
+        has_frame_ts = frame_ts_path.exists()
+        if has_frame_ts:
+            self.log_message(f"Auto-detected FrameTimestamp.csv in {imu_dir.name}/")
+        else:
+            self.log_message("FrameTimestamp.csv not found; extraction will use video timestamps")
+
+        # Step 5: Prompt for session name
+        default_name = video_path.stem
+        session_name, ok = QInputDialog.getText(
+            self, "Session Name",
+            "Enter a name for this session:",
+            text=default_name
+        )
+        if not ok or not session_name.strip():
+            return
+
+        # Step 6: Create session directory
+        session_dir = self._create_load_session_dir(session_name.strip())
+        raw_dir = session_dir / "Raw Data"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 7: Copy files into Raw Data/
+        try:
+            dest_video = raw_dir / "Recording.mp4"
+            shutil.copy2(str(video_path), str(dest_video))
+            self.log_message(f"Copied video to {dest_video.name}")
+
+            dest_imu = raw_dir / "IMUTimeStamp.csv"
+            shutil.copy2(str(imu_path), str(dest_imu))
+            self.log_message(f"Copied IMU data to {dest_imu.name}")
+
+            if has_frame_ts:
+                dest_frame_ts = raw_dir / "FrameTimestamp.csv"
+                shutil.copy2(str(frame_ts_path), str(dest_frame_ts))
+                self.log_message(f"Copied frame timestamps to {dest_frame_ts.name}")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Copy Error",
+                f"Failed to copy files into session directory:\n{e}"
+            )
+            return
+
+        # Step 8: Set session state
+        self.session_dir = session_dir
+        self.recording_file_path = str(dest_video)
+
+        # Step 9: Load video for playback
+        self.load_video_from_path(str(dest_video))
+        self.log_message(f"Session loaded: {session_dir.name}")
 
     def load_video_from_path(self, file_name):
         video_to_load = file_name
@@ -851,7 +982,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         if self._serial_reader is None:
             return
         csv_path = out_video_path.parent / "IMUTimeStamp.csv"
-        header = "timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z"
+        header = "timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z, A.X, A.Y, A.Z"
         try:
             self._sync_imu_timebase()
         except Exception:

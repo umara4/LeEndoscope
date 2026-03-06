@@ -86,7 +86,7 @@ void setup() {
   }
 
   // CSV header
-  Serial.println("Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z");
+  Serial.println("Timestamp, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z, A.X, A.Y, A.Z");
 }
 
 void loop() {
@@ -113,9 +113,12 @@ void loop() {
   // Quaternion (unitless)
   imu::Quaternion q = bno.getQuat();
 
-  // Angular velocity (BNO055 returns rad/s in Adafruit library’s “gyro vector”)
+  // Angular velocity (BNO055 returns rad/s in Adafruit library's "gyro vector")
   // If your output looks like deg/s, convert: rad/s = deg/s * (PI/180)
   imu::Vector<3> w = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+  // Linear acceleration (m/s^2, gravity removed by BNO055 fusion)
+  imu::Vector<3> a = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
 
   Serial.print(now);
   Serial.print(',');
@@ -132,6 +135,12 @@ void loop() {
   // rotation rate about the sensor y-axis
   Serial.print(w.y(), 8); Serial.print(',');
   // rotation rate about the sensor z-axis
-  Serial.println(w.z(), 8);
+  Serial.print(w.z(), 8); Serial.print(',');
+  // linear acceleration along sensor x-axis
+  Serial.print(a.x(), 8); Serial.print(',');
+  // linear acceleration along sensor y-axis
+  Serial.print(a.y(), 8); Serial.print(',');
+  // linear acceleration along sensor z-axis
+  Serial.println(a.z(), 8);
   delay(50);
 }

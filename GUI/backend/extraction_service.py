@@ -73,7 +73,8 @@ class SegmentExtractor(QThread):
                 imu_output_writer.writerow([
                     "frame_name", "frame_timestamp_ms",
                     "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
-                    "avg_WX", "avg_WY", "avg_WZ"
+                    "avg_WX", "avg_WY", "avg_WZ",
+                    "avg_AX", "avg_AY", "avg_AZ"
                 ])
             except Exception:
                 imu_output_fp = None
@@ -114,11 +115,7 @@ class SegmentExtractor(QThread):
                             if avg_imu:
                                 imu_output_writer.writerow([
                                     frame_name, f"{recording_ts_ms:.3f}",
-                                    f"{avg_imu[0]:.6f}", f"{avg_imu[1]:.6f}",
-                                    f"{avg_imu[2]:.6f}", f"{avg_imu[3]:.6f}",
-                                    f"{avg_imu[4]:.6f}", f"{avg_imu[5]:.6f}",
-                                    f"{avg_imu[6]:.6f}"
-                                ])
+                                ] + [f"{v:.6f}" for v in avg_imu])
                         except Exception:
                             pass
 
@@ -183,10 +180,10 @@ class SegmentExtractor(QThread):
                 reader = csv.reader(fp)
                 next(reader, None)  # skip header
                 for row in reader:
-                    if len(row) >= 8:
+                    if len(row) >= 11:
                         try:
                             ts_ms = float(row[0].strip())
-                            vals = [float(row[i].strip()) for i in range(1, 8)]
+                            vals = [float(row[i].strip()) for i in range(1, 11)]
                             imu_data.append((ts_ms, vals))
                         except Exception:
                             pass
@@ -204,10 +201,11 @@ class SegmentExtractor(QThread):
         closest_indices = [idx for _, idx in distances[:k]]
         if not closest_indices:
             return None
-        sums = [0.0] * 7
+        num_vals = len(imu_data[0][1])
+        sums = [0.0] * num_vals
         for idx in closest_indices:
             _, vals = imu_data[idx]
-            for i in range(7):
+            for i in range(num_vals):
                 sums[i] += vals[i]
         count = len(closest_indices)
         return [s / count for s in sums]
