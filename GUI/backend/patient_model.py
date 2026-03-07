@@ -13,7 +13,7 @@ class PatientProfile:
     """Data model for patient information."""
 
     def __init__(self, patient_id: str = None, **kwargs):
-        self.patient_id = patient_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.patient_id = patient_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
         # Basic Information
         self.first_name = kwargs.get('first_name', '')

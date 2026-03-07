@@ -18,6 +18,10 @@ from shared.form_helpers import (
     validate_password_field, validate_confirm_field,
 )
 from shared.geometry_mixin import CenteredWidgetMixin
+from shared.theme import (
+    STYLE_PAGE_TITLE, STYLE_WARNING_LABEL, STYLE_REQUIREMENTS_LABEL,
+    STYLE_ERROR_INPUT_BG,
+)
 
 
 class CreateAccountWindow(QWidget, CenteredWidgetMixin):
@@ -46,7 +50,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
 
         title = QLabel("Create Account")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        title.setStyleSheet(STYLE_PAGE_TITLE)
         main_layout.addWidget(title)
         main_layout.addSpacing(10)
 
@@ -55,7 +59,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.email_input = QLineEdit()
         self.email_input.setFixedWidth(300)
         self.email_warning = QLabel("")
-        self.email_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.email_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.email_input.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         email_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.email_input.textChanged.connect(self._validate_email)
@@ -66,7 +70,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.username_input = QLineEdit()
         self.username_input.setFixedWidth(300)
         self.username_warning = QLabel("")
-        self.username_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.username_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.username_input.textChanged.connect(self._validate_username)
         main_layout.addWidget(make_centered_form_row(username_label, self.username_input, self.username_warning))
 
@@ -76,7 +80,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.password_input.setFixedWidth(225)
         self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.password_warning = QLabel("")
-        self.password_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.password_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.password_warning.setWordWrap(True)
         self.password_input.textChanged.connect(self._validate_password)
         main_layout.addWidget(make_centered_form_row(password_label, self.password_input, self.password_warning))
@@ -87,7 +91,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
         self.confirm_input.setFixedWidth(225)
         self.confirm_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.confirm_warning = QLabel("")
-        self.confirm_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.confirm_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.confirm_warning.setWordWrap(True)
         self.confirm_input.textChanged.connect(self._validate_confirm)
         main_layout.addWidget(make_centered_form_row(confirm_label, self.confirm_input, self.confirm_warning))
@@ -101,7 +105,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
             "- One special character (!, @, #, etc.)"
         )
         self.pwd_req_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pwd_req_label.setStyleSheet("font-size: 12px; color: gray;")
+        self.pwd_req_label.setStyleSheet(STYLE_REQUIREMENTS_LABEL)
         main_layout.addWidget(self.pwd_req_label)
         main_layout.addSpacing(15)
 
@@ -137,7 +141,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
     def _validate_username(self):
         username = self.username_input.text().strip()
         if self.db and self.db.username_exists(username):
-            self.username_input.setStyleSheet("background-color: #FFCCCC")
+            self.username_input.setStyleSheet(STYLE_ERROR_INPUT_BG)
             self.username_warning.setText("Username already in use")
         else:
             self.username_input.setStyleSheet("")
@@ -146,7 +150,7 @@ class CreateAccountWindow(QWidget, CenteredWidgetMixin):
     def _validate_email(self):
         email = self.email_input.text().strip()
         if self.db and self.db.email_exists(email):
-            self.email_input.setStyleSheet("background-color: #FFCCCC")
+            self.email_input.setStyleSheet(STYLE_ERROR_INPUT_BG)
             self.email_warning.setText("Email already in use!")
         else:
             self.email_input.setStyleSheet("")

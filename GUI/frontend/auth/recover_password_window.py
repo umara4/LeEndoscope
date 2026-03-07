@@ -17,6 +17,10 @@ from shared.form_helpers import (
     validate_password_field, validate_confirm_field,
 )
 from shared.geometry_mixin import CenteredWidgetMixin
+from shared.theme import (
+    STYLE_PAGE_TITLE, STYLE_INSTRUCTIONS_LABEL, STYLE_WARNING_LABEL,
+    STYLE_REQUIREMENTS_LABEL,
+)
 
 
 class RecoverPasswordWindow(QWidget, CenteredWidgetMixin):
@@ -68,14 +72,14 @@ class RecoverPasswordWindow(QWidget, CenteredWidgetMixin):
 
         title = QLabel("Recover Password")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        title.setStyleSheet(STYLE_PAGE_TITLE)
         main_layout.addWidget(title)
         main_layout.addSpacing(10)
 
         instructions = QLabel("Enter your email or username to receive a password reset link")
         instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instructions.setWordWrap(True)
-        instructions.setStyleSheet("font-size: 12px; color: #c0c0c0;")
+        instructions.setStyleSheet(STYLE_INSTRUCTIONS_LABEL)
         main_layout.addWidget(instructions)
         main_layout.addSpacing(15)
 
@@ -84,7 +88,7 @@ class RecoverPasswordWindow(QWidget, CenteredWidgetMixin):
         self.input_field.setPlaceholderText("Enter your email or username")
         self.input_field.setFixedWidth(300)
         self.input_warning = QLabel("")
-        self.input_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.input_warning.setStyleSheet(STYLE_WARNING_LABEL)
 
         main_layout.addWidget(make_centered_form_row(label, self.input_field, self.input_warning))
         main_layout.addSpacing(20)
@@ -234,13 +238,13 @@ class ResetPasswordWindow(QWidget, CenteredWidgetMixin):
 
         title = QLabel("Reset Your Password")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        title.setStyleSheet(STYLE_PAGE_TITLE)
         main_layout.addWidget(title)
         main_layout.addSpacing(10)
 
         instructions = QLabel("Enter your new password below")
         instructions.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        instructions.setStyleSheet("font-size: 12px; color: #c0c0c0;")
+        instructions.setStyleSheet(STYLE_INSTRUCTIONS_LABEL)
         main_layout.addWidget(instructions)
         main_layout.addSpacing(15)
 
@@ -250,7 +254,7 @@ class ResetPasswordWindow(QWidget, CenteredWidgetMixin):
         self.password_input.setPlaceholderText("Enter new password")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.password_warning = QLabel("")
-        self.password_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.password_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.password_warning.setWordWrap(True)
         self.password_input.textChanged.connect(self._validate_password)
         main_layout.addWidget(make_centered_form_row(
@@ -263,7 +267,7 @@ class ResetPasswordWindow(QWidget, CenteredWidgetMixin):
         self.confirm_input.setPlaceholderText("Confirm new password")
         self.confirm_input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.confirm_warning = QLabel("")
-        self.confirm_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.confirm_warning.setStyleSheet(STYLE_WARNING_LABEL)
         self.confirm_warning.setWordWrap(True)
         self.confirm_input.textChanged.connect(self._validate_confirm)
         main_layout.addWidget(make_centered_form_row(
@@ -280,7 +284,7 @@ class ResetPasswordWindow(QWidget, CenteredWidgetMixin):
             "- One special character (!, @, #, $, %, ^, &, *)"
         )
         self.pwd_req_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pwd_req_label.setStyleSheet("font-size: 12px; color: gray;")
+        self.pwd_req_label.setStyleSheet(STYLE_REQUIREMENTS_LABEL)
         main_layout.addWidget(self.pwd_req_label)
         main_layout.addSpacing(15)
 

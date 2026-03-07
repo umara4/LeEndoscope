@@ -28,8 +28,8 @@ from typing import Optional
 
 import cv2
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout,
-    QFileDialog, QInputDialog, QMessageBox,
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QFileDialog, QInputDialog, QMessageBox, QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer, QTime, QEvent
 from PyQt6.QtGui import QTextCursor
@@ -45,7 +45,6 @@ from shared.constants import (
     RECORD_TICK_MS, LIVE_PREVIEW_MS, DEFAULT_RECORDING_FPS,
     BNO_RESET_CHECK_MS, BNO_RESET_TIMEOUT_S, IMU_SYNC_POLL_MS,
 )
-from shared.theme import VIDEO_WINDOW_STYLESHEET
 from shared.form_helpers import set_button_enabled_style
 from shared.geometry_mixin import DebouncedGeometryMixin
 from shared.geometry_store import load_geometry
@@ -81,7 +80,6 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         else:
             self.setWindowTitle("Surgical Imaging Interface")
         self.resize(1000, 600)
-        self.setStyleSheet(VIDEO_WINDOW_STYLESHEET)
 
         # Restore geometry
         g = load_geometry()
@@ -154,9 +152,6 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._side.extract_button.clicked.connect(self._toggle_extract)
         self._side.cancel_button.clicked.connect(self.cancel_extraction)
         self._side.view_frames_button.clicked.connect(self.open_frame_browser)
-        self._side.reconstruct_button.clicked.connect(self.start_reconstruction)
-        if self._side.back_to_patient_btn:
-            self._side.back_to_patient_btn.clicked.connect(self.return_to_patient)
 
         # Segment controls
         self._segments = SegmentControls()
@@ -170,6 +165,34 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
 
         main_layout.addWidget(self._side, 1)
 
+        # Center column: top bar + video viewer
+        center_column = QVBoxLayout()
+
+        top_bar = QHBoxLayout()
+        self._back_to_patient_btn = None
+        if patient_id:
+            self._back_to_patient_btn = QPushButton("Back to Patient Profile")
+            self._back_to_patient_btn.setFixedHeight(36)
+            self._back_to_patient_btn.clicked.connect(self.return_to_patient)
+            set_button_enabled_style(self._back_to_patient_btn, True)
+            top_bar.addWidget(self._back_to_patient_btn)
+
+        top_bar.addStretch()
+
+        self._reconstruct_btn = QPushButton("Start 3D Reconstruction")
+        self._reconstruct_btn.setFixedHeight(36)
+        self._reconstruct_btn.setEnabled(False)
+        set_button_enabled_style(self._reconstruct_btn, False)
+        self._reconstruct_btn.clicked.connect(self.start_reconstruction)
+        top_bar.addWidget(self._reconstruct_btn)
+
+        self._logout_btn = QPushButton("Log Out")
+        self._logout_btn.setFixedHeight(36)
+        self._logout_btn.clicked.connect(self.logout)
+        top_bar.addWidget(self._logout_btn)
+
+        center_column.addLayout(top_bar)
+
         # Video viewer
         self._viewer = VideoViewer()
         self._viewer.play_pause_button.clicked.connect(self.toggle_play_pause)
@@ -177,7 +200,9 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._viewer.forward_button.clicked.connect(lambda: self.skip_frames(self.fps))
         self._viewer.timeline_slider.sliderReleased.connect(self.scrub_video)
         self._viewer.add_segment_requested.connect(self._on_add_segment)
-        main_layout.addWidget(self._viewer, 4)
+        center_column.addWidget(self._viewer)
+
+        main_layout.addLayout(center_column, 4)
 
         # Serial monitor (right side, hidden by default)
         self._serial_panel = SerialMonitorPanel()
@@ -257,14 +282,26 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             try:
                 from frontend.patient.patient_profile_window import PatientProfileWindow
                 self.patient_window = PatientProfileWindow(db=self.patient_db)
-                self.patient_window.show()
                 geo = self.geometry()
                 self.patient_window.setGeometry(geo.x(), geo.y(), geo.width(), geo.height())
+                self._flush_geometry_save()
+                self.patient_window.show()
                 self.close()
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to return to patient profile: {e}")
         else:
             self.close()
+
+    def logout(self):
+        """Return to the login screen."""
+        self._flush_geometry_save()
+        from frontend.auth.login_window import MainLoginWindow
+        from backend.user_db import UserDatabase
+        login = MainLoginWindow(db=UserDatabase())
+        geo = self.geometry()
+        login.setGeometry(geo.x(), geo.y(), geo.width(), geo.height())
+        login.show()
+        self.close()
 
     def _patient_folder_name(self) -> Optional[str]:
         """Build 'PATIENT-FirstLast' folder name from patient DB record."""
@@ -483,7 +520,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
 
         set_button_enabled_style(self._side.extract_button, False)
         set_button_enabled_style(self._side.view_frames_button, False)
-        set_button_enabled_style(self._side.reconstruct_button, False)
+        set_button_enabled_style(self._reconstruct_btn, False)
         self.log_message("Video loaded")
 
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -1261,8 +1298,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._side.recording_panel.start_btn.setEnabled(False)
         self._side.recording_panel.stop_btn.setEnabled(True)
         self._side.recording_panel.start_btn.setText("Recording...")
-        if self._side.back_to_patient_btn:
-            set_button_enabled_style(self._side.back_to_patient_btn, False)
+        if self._back_to_patient_btn:
+            set_button_enabled_style(self._back_to_patient_btn, False)
 
         self._viewer.timeline_slider.setEnabled(True)
         self._viewer.timeline_slider.setMaximum(0)
@@ -1381,8 +1418,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._side.recording_panel.start_btn.setEnabled(True)
         self._side.recording_panel.stop_btn.setEnabled(False)
         self._side.recording_panel.start_btn.setText("Start Recording")
-        if self._side.back_to_patient_btn:
-            set_button_enabled_style(self._side.back_to_patient_btn, True)
+        if self._back_to_patient_btn:
+            set_button_enabled_style(self._back_to_patient_btn, True)
 
         # Move recording files to Raw Data
         try:
@@ -1439,9 +1476,9 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._side.load_button.setEnabled(False)
         self._side.cancel_button.setVisible(True)
         self._side.progress_bar.setVisible(True)
-        set_button_enabled_style(self._side.reconstruct_button, True)
-        if self._side.back_to_patient_btn:
-            set_button_enabled_style(self._side.back_to_patient_btn, False)
+        set_button_enabled_style(self._reconstruct_btn, True)
+        if self._back_to_patient_btn:
+            set_button_enabled_style(self._back_to_patient_btn, False)
         self._side.progress_bar.setValue(0)
         self.segment_progress.clear()
         self.completed_segments = 0
@@ -1477,8 +1514,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             self._side.load_button.setEnabled(True)
             set_button_enabled_style(self._side.view_frames_button, True)
             set_button_enabled_style(self._side.extract_button, False)
-            if self._side.back_to_patient_btn:
-                set_button_enabled_style(self._side.back_to_patient_btn, True)
+            if self._back_to_patient_btn:
+                set_button_enabled_style(self._back_to_patient_btn, True)
             self._side.set_extract_expanded(False)
             self.log_message("Frame extraction finished")
             if self.patient_id and self.patient_db:
@@ -1495,8 +1532,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._side.load_button.setEnabled(True)
         self._side.set_extract_expanded(False)
         self.log_message("Frame extraction cancelled")
-        if self._side.back_to_patient_btn:
-            set_button_enabled_style(self._side.back_to_patient_btn, True)
+        if self._back_to_patient_btn:
+            set_button_enabled_style(self._back_to_patient_btn, True)
 
     # ------------------------------------------------------------------
     # Frame browser & reconstruction

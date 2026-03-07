@@ -14,7 +14,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTime, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
-from shared.theme import VIEWER_LABEL_STYLE
+from shared.theme import (
+    VIEWER_LABEL_STYLE, SLIDER_BASE_STYLE,
+    SLIDER_GROOVE, SLIDER_HANDLE, SLIDER_HANDLE_BORDER,
+    SEGMENT_HIGHLIGHT, BORDER_DEFAULT, SPACE_XS, RADIUS_SM,
+)
 
 
 class VideoViewer(QWidget):
@@ -86,22 +90,7 @@ class VideoViewer(QWidget):
         layout.addLayout(seg_row)
 
         # Slider base style for resetting
-        self.slider_base_style = """
-            QSlider::groove:horizontal {
-                border: 1px solid #999999;
-                height: 8px;
-                background: #606060;
-                margin: 2px 0;
-                border-radius: 4px;
-            }
-            QSlider::handle:horizontal {
-                background: #c0c0c0;
-                border: 1px solid #5c5c5c;
-                width: 18px;
-                margin: -2px 0;
-                border-radius: 9px;
-            }
-        """
+        self.slider_base_style = SLIDER_BASE_STYLE
         self.timeline_slider.setStyleSheet(self.slider_base_style)
 
     def _on_add_segment(self):
@@ -137,7 +126,7 @@ class VideoViewer(QWidget):
             return
 
         total = max(1, total_frames - 1)
-        stops = [(0.0, "#606060")]
+        stops = [(0.0, SLIDER_GROOVE)]
         epsilon = 1.0 / max(10_000, total)
         for seg in segments:
             start_sec = QTime(0, 0).secsTo(seg["start"])
@@ -147,26 +136,26 @@ class VideoViewer(QWidget):
             start_ratio = max(0.0, min(1.0, start_frame / total))
             end_ratio = max(start_ratio + epsilon, min(1.0, end_frame / total))
             stops.extend([
-                (start_ratio, "#606060"),
-                (min(1.0, start_ratio + epsilon), "#80c080"),
-                (end_ratio, "#80c080"),
-                (min(1.0, end_ratio + epsilon), "#606060"),
+                (start_ratio, SLIDER_GROOVE),
+                (min(1.0, start_ratio + epsilon), SEGMENT_HIGHLIGHT),
+                (end_ratio, SEGMENT_HIGHLIGHT),
+                (min(1.0, end_ratio + epsilon), SLIDER_GROOVE),
             ])
-        stops.append((1.0, "#606060"))
+        stops.append((1.0, SLIDER_GROOVE))
         stops = sorted({(pos, color) for pos, color in stops}, key=lambda x: x[0])
         stop_str = ",\n        ".join(f"stop:{pos:.4f} {color}" for pos, color in stops)
         style = f"""
             QSlider::groove:horizontal {{
-                border: 1px solid #999999;
+                border: 1px solid {BORDER_DEFAULT};
                 height: 8px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     {stop_str});
-                margin: 2px 0;
-                border-radius: 4px;
+                margin: {SPACE_XS} 0;
+                border-radius: {RADIUS_SM};
             }}
             QSlider::handle:horizontal {{
-                background: #c0c0c0;
-                border: 1px solid #5c5c5c;
+                background: {SLIDER_HANDLE};
+                border: 1px solid {SLIDER_HANDLE_BORDER};
                 width: 18px;
                 margin: -2px 0;
                 border-radius: 9px;

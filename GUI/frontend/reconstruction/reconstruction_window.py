@@ -22,7 +22,11 @@ from PyQt6.QtCore import Qt, QEvent, QSize
 
 from shared.geometry_store import load_geometry, get_start_size
 from shared.geometry_mixin import DebouncedGeometryMixin
-from shared.theme import RECONSTRUCTION_STYLESHEET, SIDE_PANEL_STYLESHEET
+from shared.theme import (
+    SIDE_PANEL_STYLE, STYLE_VIEWER_CONTAINER, STYLE_ZOOM_BTN,
+    STYLE_MANIP_FRAME, STYLE_MANIP_BTN, STYLE_MANIP_HOME_BTN,
+    PYVISTA_BG, BG_BASE, TEXT_SECONDARY,
+)
 
 try:
     import importlib
@@ -58,14 +62,12 @@ class ReconstructionWindow(QMainWindow, DebouncedGeometryMixin):
             else:
                 self.resize(1000, 700)
 
-        self.setStyleSheet(RECONSTRUCTION_STYLESHEET)
-
         central = QWidget(self)
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
 
         side_panel = QFrame(central)
-        side_panel.setStyleSheet(SIDE_PANEL_STYLESHEET)
+        side_panel.setStyleSheet(SIDE_PANEL_STYLE)
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(8, 8, 8, 8)
         side_layout.setSpacing(8)
@@ -84,25 +86,19 @@ class ReconstructionWindow(QMainWindow, DebouncedGeometryMixin):
         side_layout.addStretch(1)
 
         viewer_container = QWidget(central)
-        viewer_container.setStyleSheet("""
-            QWidget {
-                background-color: #404040;
-                border: 0.5px solid #000000;
-                border-radius: 8px;
-            }
-        """)
+        viewer_container.setStyleSheet(STYLE_VIEWER_CONTAINER)
         viewer_layout = QVBoxLayout(viewer_container)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
 
         self.placeholder = QLabel("PyVista interactive view not available.", viewer_container)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.placeholder.setStyleSheet("background-color: #404040; color: #ffffff; border: none;")
+        self.placeholder.setStyleSheet(f"background-color: {BG_BASE}; color: {TEXT_SECONDARY}; border: none;")
 
         self.plotter = None
         if PYVISTA_AVAILABLE:
             try:
                 self.plotter = QtInteractor(viewer_container)
-                self.plotter.set_background('#404040')
+                self.plotter.set_background(PYVISTA_BG)
                 viewer_layout.addWidget(self.plotter, stretch=1)
                 try:
                     self.plotter.show_axes()
@@ -429,12 +425,12 @@ class ReconstructionWindow(QMainWindow, DebouncedGeometryMixin):
 
         btn_zoom_in = QPushButton("+")
         btn_zoom_in.setFixedSize(36, 32)
-        btn_zoom_in.setStyleSheet("background: rgba(128,128,128,0.8); border-radius: 16px; font-weight: bold; font-size: 18px; color: white;")
+        btn_zoom_in.setStyleSheet(STYLE_ZOOM_BTN)
         btn_zoom_in.clicked.connect(lambda: self._zoom(1))
 
         btn_zoom_out = QPushButton("-")
         btn_zoom_out.setFixedSize(36, 32)
-        btn_zoom_out.setStyleSheet("background: rgba(128,128,128,0.8); border-radius: 16px; font-weight: bold; font-size: 18px; color: white;")
+        btn_zoom_out.setStyleSheet(STYLE_ZOOM_BTN)
         btn_zoom_out.clicked.connect(lambda: self._zoom(-1))
 
         zoom_layout.addWidget(btn_zoom_in)
@@ -451,12 +447,7 @@ class ReconstructionWindow(QMainWindow, DebouncedGeometryMixin):
 
         self._manip = QFrame(interactor)
         self._manip.setObjectName("manipulator")
-        self._manip.setStyleSheet("""
-            #manipulator {
-                background-color: #404040;
-                border-radius: 8px;
-            }
-        """)
+        self._manip.setStyleSheet(STYLE_MANIP_FRAME)
         self._manip.setFixedSize(QSize(140, 140))
         grid = QGridLayout(self._manip)
         grid.setContentsMargins(8, 8, 8, 8)
@@ -474,38 +465,10 @@ class ReconstructionWindow(QMainWindow, DebouncedGeometryMixin):
 
         for b in (btn_up, btn_down, btn_left, btn_right):
             b.setFixedSize(36, 36)
-            b.setStyleSheet("""
-                QPushButton {
-                    background-color: #404040;
-                    color: #c0c0c0;
-                    border: none;
-                    border-radius: 6px;
-                }
-                QPushButton:hover {
-                    background-color: #505050;
-                }
-                QPushButton:pressed {
-                    background-color: #303030;
-                }
-            """)
+            b.setStyleSheet(STYLE_MANIP_BTN)
 
         btn_center.setFixedSize(36, 36)
-        btn_center.setStyleSheet("""
-            QPushButton {
-                background-color: #404040;
-                color: #c0c0c0;
-                border: 1px solid black;
-                border-radius: 6px;
-                font-size: 10px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #505050;
-            }
-            QPushButton:pressed {
-                background-color: #303030;
-            }
-        """)
+        btn_center.setStyleSheet(STYLE_MANIP_HOME_BTN)
 
         grid.addWidget(btn_up, 0, 1)
         grid.addWidget(btn_left, 1, 0)

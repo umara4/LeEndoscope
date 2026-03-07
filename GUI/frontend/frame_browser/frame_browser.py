@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtCore import Qt
 
-from shared.theme import FRAME_BROWSER_STYLESHEET
 from shared.constants import FRAME_SELECTION_PATH
 
 
@@ -30,8 +29,6 @@ class FrameBrowser(QDialog):
         self.resize(900, 650)
         self.video_id = video_id or "__default__"
         self.initial_selection = initial_selection or {}
-
-        self.setStyleSheet(FRAME_BROWSER_STYLESHEET)
 
         self.selection_file = str(FRAME_SELECTION_PATH)
         self.store, self.selected_frames = self._load_selection()

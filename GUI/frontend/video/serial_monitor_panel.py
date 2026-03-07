@@ -9,7 +9,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTextEdit
 from PyQt6.QtGui import QTextCursor
 
-from shared.theme import SERIAL_MONITOR_STYLESHEET
+from shared.theme import SERIAL_MONITOR_STYLE
 
 
 class SerialMonitorPanel(QFrame):
@@ -17,7 +17,7 @@ class SerialMonitorPanel(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(SERIAL_MONITOR_STYLESHEET)
+        self.setStyleSheet(SERIAL_MONITOR_STYLE)
 
         self.autoscroll = True
 

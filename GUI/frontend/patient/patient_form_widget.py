@@ -13,8 +13,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QDate
 
 from shared.theme import (
-    SIDE_PANEL_STYLESHEET, NAV_BUTTON_STYLE, BLUE_BUTTON_STYLE,
-    COMBOBOX_DARK_DROPDOWN_STYLE, TEXTBOX_STYLE,
+    SIDE_PANEL_STYLE, NAV_BUTTON_STYLE, ACCENT_BUTTON_STYLE,
+    SCROLL_AREA_STYLE, STYLE_SECTION_FRAME, STYLE_SECTION_TITLE,
+    STYLE_SEPARATOR, STYLE_BOLD_LABEL,
 )
 
 
@@ -23,7 +24,7 @@ class PatientFormWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(SIDE_PANEL_STYLESHEET)
+        self.setStyleSheet(SIDE_PANEL_STYLE)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -50,25 +51,7 @@ class PatientFormWidget(QFrame):
         # Scrollable content area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                background-color: #404040;
-                border: none;
-            }
-            QScrollBar:vertical {
-                background-color: #505050;
-                width: 12px;
-                border: none;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #708090;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #7a8fa5;
-            }
-        """)
+        scroll.setStyleSheet(SCROLL_AREA_STYLE)
 
         # Content widget that holds all sections
         content_widget = QWidget()
@@ -125,7 +108,7 @@ class PatientFormWidget(QFrame):
 
         # Save Button at bottom
         self.save_btn = QPushButton("Save Patient")
-        self.save_btn.setStyleSheet(BLUE_BUTTON_STYLE)
+        self.save_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
         layout.addWidget(self.save_btn)
 
         self.scroll_area = scroll
@@ -139,13 +122,7 @@ class PatientFormWidget(QFrame):
     def _create_collapsible_section(self, title: str, fields_layout) -> QFrame:
         """Create a collapsible section frame with title and fields."""
         section = QFrame()
-        section.setStyleSheet("""
-            QFrame {
-                background-color: transparent;
-                border: none;
-                border-radius: 0px;
-            }
-        """)
+        section.setStyleSheet(STYLE_SECTION_FRAME)
 
         section_layout = QVBoxLayout(section)
         section_layout.setContentsMargins(10, 10, 10, 10)
@@ -153,21 +130,14 @@ class PatientFormWidget(QFrame):
 
         # Section title
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                background-color: transparent;
-                font-weight: bold;
-                font-size: 13px;
-            }
-        """)
+        title_label.setStyleSheet(STYLE_SECTION_TITLE)
         section_layout.addWidget(title_label)
 
         # Separator line
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setStyleSheet("color: #606060;")
+        line.setStyleSheet(STYLE_SEPARATOR)
         section_layout.addWidget(line)
 
         # Content
@@ -194,7 +164,6 @@ class PatientFormWidget(QFrame):
 
         self.gender_combo = QComboBox()
         self.gender_combo.addItems(["Not specified", "Male", "Female", "Other"])
-        self.gender_combo.setStyleSheet(COMBOBOX_DARK_DROPDOWN_STYLE)
         layout.addRow("Gender:", self.gender_combo)
 
         self.contact_input = QLineEdit()
@@ -258,19 +227,16 @@ class PatientFormWidget(QFrame):
         self.medical_history_text = QTextEdit()
         self.medical_history_text.setPlaceholderText("Medical history and conditions...")
         self.medical_history_text.setMaximumHeight(80)
-        self.medical_history_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Medical History:", self.medical_history_text)
 
         self.allergies_text = QTextEdit()
         self.allergies_text.setPlaceholderText("Known allergies...")
         self.allergies_text.setMaximumHeight(80)
-        self.allergies_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Allergies:", self.allergies_text)
 
         self.medications_text = QTextEdit()
         self.medications_text.setPlaceholderText("Current medications...")
         self.medications_text.setMaximumHeight(80)
-        self.medications_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Current Medications:", self.medications_text)
 
         return layout
@@ -298,7 +264,6 @@ class PatientFormWidget(QFrame):
         self.tumor_description_text = QTextEdit()
         self.tumor_description_text.setPlaceholderText("Detailed tumor description...")
         self.tumor_description_text.setMaximumHeight(80)
-        self.tumor_description_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Description:", self.tumor_description_text)
 
         return layout
@@ -323,7 +288,6 @@ class PatientFormWidget(QFrame):
         self.surgery_notes_text = QTextEdit()
         self.surgery_notes_text.setPlaceholderText("Surgery notes and observations...")
         self.surgery_notes_text.setMaximumHeight(80)
-        self.surgery_notes_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Surgery Notes:", self.surgery_notes_text)
 
         return layout
@@ -335,13 +299,11 @@ class PatientFormWidget(QFrame):
         self.pre_surgery_text = QTextEdit()
         self.pre_surgery_text.setPlaceholderText("Pre-surgery preparation notes, patient status, etc...")
         self.pre_surgery_text.setMaximumHeight(80)
-        self.pre_surgery_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Pre-Surgery Notes:", self.pre_surgery_text)
 
         self.post_surgery_text = QTextEdit()
         self.post_surgery_text.setPlaceholderText("Post-surgery recovery notes, observations, etc...")
         self.post_surgery_text.setMaximumHeight(80)
-        self.post_surgery_text.setStyleSheet(TEXTBOX_STYLE)
         layout.addRow("Post-Surgery Notes:", self.post_surgery_text)
 
         return layout
@@ -352,7 +314,7 @@ class PatientFormWidget(QFrame):
 
         # Videos section
         videos_label = QLabel("Associated Videos:")
-        videos_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        videos_label.setStyleSheet(STYLE_BOLD_LABEL)
         layout.addWidget(videos_label)
 
         self.videos_list = QListWidget()
@@ -367,7 +329,7 @@ class PatientFormWidget(QFrame):
 
         # Images section
         images_label = QLabel("Associated Images:")
-        images_label.setStyleSheet("font-weight: bold; color: #ffffff; margin-top: 20px;")
+        images_label.setStyleSheet(STYLE_BOLD_LABEL + " margin-top: 20px;")
         layout.addWidget(images_label)
 
         self.images_list = QListWidget()

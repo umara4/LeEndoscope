@@ -11,7 +11,7 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QListWidgetItem, QMessageBox, QFileDialog,
+    QListWidgetItem, QMessageBox, QFileDialog, QPushButton,
 )
 from PyQt6.QtCore import Qt, QDate
 
@@ -19,7 +19,6 @@ from backend.patient_model import PatientProfile
 from backend.patient_db import PatientDatabase
 from shared.geometry_mixin import DebouncedGeometryMixin
 from shared.geometry_store import load_geometry
-from shared.theme import PATIENT_WINDOW_STYLESHEET
 
 from frontend.patient.patient_list_widget import PatientListWidget
 from frontend.patient.patient_form_widget import PatientFormWidget
@@ -32,9 +31,6 @@ class PatientProfileWindow(QMainWindow, DebouncedGeometryMixin):
         super().__init__()
         self.setWindowTitle("Patient Profile Manager")
         self.resize(1400, 800)
-
-        # Set dark theme
-        self.setStyleSheet(PATIENT_WINDOW_STYLESHEET)
 
         # Restore geometry if available
         g = load_geometry()
@@ -51,6 +47,15 @@ class PatientProfileWindow(QMainWindow, DebouncedGeometryMixin):
         # Create main layout
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
+
+        # Top bar with logout button
+        top_bar = QHBoxLayout()
+        top_bar.addStretch()
+        self.logout_btn = QPushButton("Log Out")
+        self.logout_btn.setFixedWidth(100)
+        self.logout_btn.clicked.connect(self.logout)
+        top_bar.addWidget(self.logout_btn)
+        main_layout.addLayout(top_bar)
 
         # Content area with patient list and form
         content_layout = QHBoxLayout()
@@ -201,57 +206,77 @@ class PatientProfileWindow(QMainWindow, DebouncedGeometryMixin):
         f.videos_list.clear()
         f.images_list.clear()
 
+    def _copy_form_to_patient(self):
+        """Copy all form field values into self.current_patient."""
+        p = self.current_patient
+        f = self.patient_form_widget
+
+        p.first_name = f.first_name_input.text()
+        p.last_name = f.last_name_input.text()
+        p.date_of_birth = f.dob_input.date().toString("yyyy-MM-dd")
+        p.gender = f.gender_combo.currentText()
+        p.contact_number = f.contact_input.text()
+        p.email = f.email_input.text()
+
+        p.street_address = f.street_input.text()
+        p.city = f.city_input.text()
+        p.state_province = f.state_input.text()
+        p.postal_code = f.postal_input.text()
+        p.country = f.country_input.text()
+
+        p.emergency_contact_name = f.emergency_name_input.text()
+        p.emergency_contact_phone = f.emergency_phone_input.text()
+        p.emergency_contact_relationship = f.emergency_relationship_input.text()
+
+        p.medical_history = f.medical_history_text.toPlainText()
+        p.allergies = f.allergies_text.toPlainText()
+        p.current_medications = f.medications_text.toPlainText()
+
+        p.tumor_location = f.tumor_location_input.text()
+        p.tumor_size = f.tumor_size_input.text()
+        p.tumor_type = f.tumor_type_input.text()
+        p.tumor_stage = f.tumor_stage_combo.currentText()
+        p.tumor_description = f.tumor_description_text.toPlainText()
+
+        p.surgery_date = f.surgery_date_input.date().toString("yyyy-MM-dd")
+        p.surgery_type = f.surgery_type_input.text()
+        p.surgeon_name = f.surgeon_input.text()
+        p.surgery_notes = f.surgery_notes_text.toPlainText()
+
+        p.pre_surgery_notes = f.pre_surgery_text.toPlainText()
+        p.post_surgery_notes = f.post_surgery_text.toPlainText()
+
     def save_current_patient(self):
         """Save current patient data from form."""
         if not self.current_patient:
             QMessageBox.warning(self, "Error", "No patient selected or created.")
             return
 
-        f = self.patient_form_widget
-
-        # Update patient data from form
-        self.current_patient.first_name = f.first_name_input.text()
-        self.current_patient.last_name = f.last_name_input.text()
-        self.current_patient.date_of_birth = f.dob_input.date().toString("yyyy-MM-dd")
-        self.current_patient.gender = f.gender_combo.currentText()
-        self.current_patient.contact_number = f.contact_input.text()
-        self.current_patient.email = f.email_input.text()
-
-        self.current_patient.street_address = f.street_input.text()
-        self.current_patient.city = f.city_input.text()
-        self.current_patient.state_province = f.state_input.text()
-        self.current_patient.postal_code = f.postal_input.text()
-        self.current_patient.country = f.country_input.text()
-
-        self.current_patient.emergency_contact_name = f.emergency_name_input.text()
-        self.current_patient.emergency_contact_phone = f.emergency_phone_input.text()
-        self.current_patient.emergency_contact_relationship = f.emergency_relationship_input.text()
-
-        self.current_patient.medical_history = f.medical_history_text.toPlainText()
-        self.current_patient.allergies = f.allergies_text.toPlainText()
-        self.current_patient.current_medications = f.medications_text.toPlainText()
-
-        self.current_patient.tumor_location = f.tumor_location_input.text()
-        self.current_patient.tumor_size = f.tumor_size_input.text()
-        self.current_patient.tumor_type = f.tumor_type_input.text()
-        self.current_patient.tumor_stage = f.tumor_stage_combo.currentText()
-        self.current_patient.tumor_description = f.tumor_description_text.toPlainText()
-
-        self.current_patient.surgery_date = f.surgery_date_input.date().toString("yyyy-MM-dd")
-        self.current_patient.surgery_type = f.surgery_type_input.text()
-        self.current_patient.surgeon_name = f.surgeon_input.text()
-        self.current_patient.surgery_notes = f.surgery_notes_text.toPlainText()
-
-        self.current_patient.pre_surgery_notes = f.pre_surgery_text.toPlainText()
-        self.current_patient.post_surgery_notes = f.post_surgery_text.toPlainText()
-
-        # Save to database
+        self._copy_form_to_patient()
         self.db.save_patient(self.current_patient)
-
-        # Refresh patient list
         self.refresh_patient_list()
-
         QMessageBox.information(self, "Success", "Patient profile saved successfully.")
+
+    def _save_patient_silently(self):
+        """Save current patient without showing a success dialog."""
+        try:
+            self._copy_form_to_patient()
+            self.db.save_patient(self.current_patient)
+        except Exception:
+            pass
+
+    def logout(self):
+        """Save patient silently, then return to the login screen."""
+        if self.current_patient:
+            self._save_patient_silently()
+        self._flush_geometry_save()
+        from frontend.auth.login_window import MainLoginWindow
+        from backend.user_db import UserDatabase
+        login = MainLoginWindow(db=UserDatabase())
+        geo = self.geometry()
+        login.setGeometry(geo.x(), geo.y(), geo.width(), geo.height())
+        login.show()
+        self.close()
 
     def add_video(self):
         """Add video file to patient profile."""
@@ -314,6 +339,9 @@ class PatientProfileWindow(QMainWindow, DebouncedGeometryMixin):
                 patient_id=self.current_patient.patient_id,
                 patient_db=self.db
             )
+            geo = self.geometry()
+            self.surgery_window.setGeometry(geo.x(), geo.y(), geo.width(), geo.height())
+            self._flush_geometry_save()
             self.surgery_window.show()
             self.close()
         except Exception as e:

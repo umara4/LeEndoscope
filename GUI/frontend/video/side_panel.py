@@ -2,8 +2,9 @@
 Side panel widget for the Video Window.
 
 Contains: Load Data, Flash Hardware, Setup System, Serial Monitor toggle,
-Recording, Segments, Extract Frames, View Frames, Reconstruct,
-Back to Patient buttons, and the terminal display.
+Recording, Segments, Extract Frames, View Frames buttons, and the terminal
+display. Navigation buttons (Back to Patient, Reconstruct, Log Out) live
+in the top bar above the video preview — see video_main_window.py.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QTextEdit, QProgressBar, QWidget,
 )
 
-from shared.theme import SIDE_PANEL_STYLESHEET, TERMINAL_STYLE, TERMINAL_LABEL_STYLE
+from shared.theme import SIDE_PANEL_STYLE, TERMINAL_DISPLAY_STYLE, TERMINAL_LABEL_STYLE, STYLE_BOLD_LABEL
 from shared.form_helpers import set_button_enabled_style
 from frontend.video.recording_panel import RecordingPanel
 
@@ -22,7 +23,7 @@ class SidePanel(QFrame):
 
     def __init__(self, has_patient: bool = False, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(SIDE_PANEL_STYLESHEET)
+        self.setStyleSheet(SIDE_PANEL_STYLE)
 
         layout = QVBoxLayout(self)
 
@@ -43,7 +44,7 @@ class SidePanel(QFrame):
         flash_layout.setSpacing(6)
 
         flash_com_label = QLabel("Select COM Port:")
-        flash_com_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        flash_com_label.setStyleSheet(STYLE_BOLD_LABEL)
         self.flash_comport_combo = QComboBox()
         flash_layout.addWidget(flash_com_label)
         flash_layout.addWidget(self.flash_comport_combo)
@@ -71,13 +72,13 @@ class SidePanel(QFrame):
         setup_layout.setSpacing(6)
 
         camera_label = QLabel("Select Camera:")
-        camera_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        camera_label.setStyleSheet(STYLE_BOLD_LABEL)
         self.camera_combo = QComboBox()
         setup_layout.addWidget(camera_label)
         setup_layout.addWidget(self.camera_combo)
 
         com_label = QLabel("Select COM Port:")
-        com_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        com_label.setStyleSheet(STYLE_BOLD_LABEL)
         self.comport_combo = QComboBox()
         setup_layout.addWidget(com_label)
         setup_layout.addWidget(self.comport_combo)
@@ -146,22 +147,13 @@ class SidePanel(QFrame):
         set_button_enabled_style(self.view_frames_button, False)
         layout.addWidget(self.view_frames_button)
 
-        # --- Reconstruct ---
-        self.reconstruct_button = QPushButton("Start 3D Reconstruction")
-        self.reconstruct_button.setEnabled(False)
-        set_button_enabled_style(self.reconstruct_button, False)
+        # --- Start Reconstruction ---
+        self.reconstruct_button = QPushButton("Start Reconstruction")
+        self.reconstruct_button.setFixedHeight(40)
         layout.addWidget(self.reconstruct_button)
 
         # --- Spacer ---
         layout.addStretch(1)
-
-        # --- Back to Patient (conditional) ---
-        self.back_to_patient_btn = None
-        if has_patient:
-            self.back_to_patient_btn = QPushButton("Back to Patient Profile")
-            self.back_to_patient_btn.setFixedHeight(40)
-            set_button_enabled_style(self.back_to_patient_btn, True)
-            layout.addWidget(self.back_to_patient_btn)
 
         # --- Terminal ---
         terminal_label = QLabel("Terminal")
@@ -171,7 +163,7 @@ class SidePanel(QFrame):
         self.terminal_display = QTextEdit()
         self.terminal_display.setReadOnly(True)
         self.terminal_display.setFixedHeight(120)
-        self.terminal_display.setStyleSheet(TERMINAL_STYLE)
+        self.terminal_display.setStyleSheet(TERMINAL_DISPLAY_STYLE)
         layout.addWidget(self.terminal_display)
 
     # --- Toggle helpers ---

@@ -13,6 +13,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 from shared.form_helpers import AnimatedButton, make_centered_form_row
 from shared.geometry_mixin import CenteredWidgetMixin, copy_geometry_state
+from shared.theme import STYLE_APP_TITLE, STYLE_WARNING_LABEL, STYLE_HYPERLINK
 
 
 class MainLoginWindow(QWidget, CenteredWidgetMixin):
@@ -29,7 +30,7 @@ class MainLoginWindow(QWidget, CenteredWidgetMixin):
 
     def _build_ui(self):
         title = QLabel("LeEndoscope")
-        title.setStyleSheet("font-size: 48px; font-weight: bold; color: #ffffff;")
+        title.setStyleSheet(STYLE_APP_TITLE)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         login_btn = QPushButton("Login")
@@ -104,7 +105,7 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         self.username.setFixedWidth(300)
 
         self.username_warning = QLabel("")
-        self.username_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.username_warning.setStyleSheet(STYLE_WARNING_LABEL)
 
         self.password = QLineEdit()
         self.password.setPlaceholderText("Enter password")
@@ -112,7 +113,7 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         self.password.setFixedWidth(300)
 
         self.password_warning = QLabel("")
-        self.password_warning.setStyleSheet("color: red; font-size: 12px;")
+        self.password_warning.setStyleSheet(STYLE_WARNING_LABEL)
 
         login_button = AnimatedButton("Login")
         login_button.setFixedSize(150, 40)
@@ -144,7 +145,7 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         recover_label = QLabel('Forgot your password? <a href="recover"><u>Recover your password</u></a>')
         recover_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         recover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        recover_label.setStyleSheet("QLabel a { color: #90d5ff; text-decoration: underline; }")
+        recover_label.setStyleSheet(STYLE_HYPERLINK)
         recover_label.linkActivated.connect(self._show_recover_password)
         form.addWidget(recover_label)
 
@@ -169,8 +170,8 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
             QMessageBox.information(self, "Success", f"Welcome, {user}!")
             self.login_successful.emit()
 
-            from frontend.patient.patient_profile_window import PatientProfileWindow
-            self.patient_window = PatientProfileWindow()
+            from frontend.app_shell import AppShell
+            self.patient_window = AppShell(user_db=self.db)
             self.transition_to(self.patient_window)
         else:
             QMessageBox.warning(self, "Login failed", "Invalid username or password.")

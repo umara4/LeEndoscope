@@ -17,6 +17,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QColor, QPalette
 
+from shared.theme import (
+    BTN_DISABLED_BG, BTN_DISABLED_TEXT,
+    BORDER_DEFAULT, BORDER_SUBTLE, RADIUS_SM, SPACE_MD,
+    ERROR_BG,
+)
+
 
 # ---------------------------------------------------------------------------
 # Form row builder (was duplicated 4x in ui_windows.py)
@@ -121,7 +127,7 @@ def validate_password_field(
         except Exception:
             pass
     else:
-        palette.setColor(QPalette.ColorRole.Base, QColor("#FFCCCC"))
+        palette.setColor(QPalette.ColorRole.Base, QColor(ERROR_BG))
         try:
             password_warning.setText("Password does not meet requirements")
         except Exception:
@@ -149,7 +155,7 @@ def validate_confirm_field(
         except Exception:
             pass
     else:
-        palette.setColor(QPalette.ColorRole.Base, QColor("#FFCCCC"))
+        palette.setColor(QPalette.ColorRole.Base, QColor(ERROR_BG))
         try:
             confirm_warning.setText("Passwords do not match")
         except Exception:
@@ -234,34 +240,19 @@ def set_button_enabled_style(button: QPushButton, enabled: bool):
     """Set a button's enabled state with appropriate styling.
 
     When disabled, the button text turns grey and the button cannot be clicked.
-    When enabled, the button has its normal dark text and hover effects.
+    When enabled, the button inherits from the global APP_STYLESHEET.
     """
     button.setEnabled(enabled)
     if enabled:
-        button.setStyleSheet("""
-            QPushButton {
-                background-color: #c0c0c0;
-                border: 1px solid #a0a0a0;
-                border-radius: 4px;
-                padding: 8px;
-                font-weight: bold;
-                color: #000000;
-            }
-            QPushButton:hover {
-                background-color: #d0d0d0;
-            }
-            QPushButton:pressed {
-                background-color: #b0b0b0;
-            }
-        """)
+        button.setStyleSheet("")  # Reset to inherit from APP_STYLESHEET
     else:
-        button.setStyleSheet("""
-            QPushButton {
-                background-color: #c0c0c0;
-                border: 1px solid #a0a0a0;
-                border-radius: 4px;
-                padding: 8px;
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BTN_DISABLED_BG};
+                border: 1px solid {BORDER_SUBTLE};
+                border-radius: {RADIUS_SM};
+                padding: {SPACE_MD};
                 font-weight: bold;
-                color: #808080;
-            }
+                color: {BTN_DISABLED_TEXT};
+            }}
         """)
