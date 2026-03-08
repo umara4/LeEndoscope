@@ -645,6 +645,11 @@ NAV_BAR_BUTTON_STYLE = f"""
     QPushButton:hover {{
         background-color: {BTN_DEFAULT_HOVER};
     }}
+    QPushButton:disabled {{
+        background-color: {BTN_DISABLED_BG};
+        color: {BTN_DISABLED_TEXT};
+        border: 1px solid {BORDER_SUBTLE};
+    }}
 """
 
 NAV_BAR_ACTIVE_STYLE = f"""

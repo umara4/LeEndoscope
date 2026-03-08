@@ -18,17 +18,27 @@ from shared.constants import FRAME_SELECTION_PATH
 
 
 class FrameBrowser(QDialog):
-    def __init__(self, segments, video_id=None, parent=None, initial_selection=None):
+    def __init__(self, segments, video_id=None, parent=None, initial_selection=None,
+                 all_frames_dir=None):
         """
         segments: list of tuples -> [(segment_name, folder_path), ...]
         video_id: unique identifier for the loaded video (e.g., absolute path)
         initial_selection: optional seed data to merge for this video
+        all_frames_dir: path to All Frames directory (for total frame count)
         """
         super().__init__(parent)
         self.setWindowTitle("Extracted Frames")
         self.resize(900, 650)
         self.video_id = video_id or "__default__"
         self.initial_selection = initial_selection or {}
+
+        # Count total frames from All Frames directory
+        self.total_video_frames = 0
+        if all_frames_dir and os.path.isdir(all_frames_dir):
+            self.total_video_frames = len([
+                f for f in os.listdir(all_frames_dir)
+                if f.lower().endswith((".jpg", ".png"))
+            ])
 
         self.selection_file = str(FRAME_SELECTION_PATH)
         self.store, self.selected_frames = self._load_selection()
@@ -60,6 +70,7 @@ class FrameBrowser(QDialog):
             grid = QGridLayout(container)
 
             images = sorted([f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".png"))])
+            seg_frame_count = len(images)
             for i, img_name in enumerate(images):
                 path = os.path.join(folder, img_name)
 
@@ -97,7 +108,8 @@ class FrameBrowser(QDialog):
                     total_checked += 1
 
             scroll.setWidget(container)
-            self.tabs.addTab(scroll, seg_name)
+            tab_label = f"{seg_name} ({seg_frame_count} frames)"
+            self.tabs.addTab(scroll, tab_label)
 
         # Footer with actions
         action_bar = QHBoxLayout()
@@ -149,7 +161,11 @@ class FrameBrowser(QDialog):
                 pass
 
     def _update_summary(self, checked, total):
-        self.summary_label.setText(f"Selected: {checked} / {total}")
+        parts = []
+        if self.total_video_frames > 0:
+            parts.append(f"Total video frames: {self.total_video_frames}")
+        parts.append(f"Selected: {checked} / {total}")
+        self.summary_label.setText("  |  ".join(parts))
 
     def closeEvent(self, event):
         # Persist selections automatically when closing the dialog

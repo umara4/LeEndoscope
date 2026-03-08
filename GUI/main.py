@@ -9,7 +9,6 @@ from shared.theme import APP_STYLESHEET
 from backend.user_db import UserDatabase
 from frontend.auth.login_window import MainLoginWindow
 
-
 def main():
     app = QApplication(sys.argv)
 
@@ -24,7 +23,6 @@ def main():
     main_login = MainLoginWindow(db=db)
     main_login.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

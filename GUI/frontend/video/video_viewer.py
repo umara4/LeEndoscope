@@ -114,8 +114,10 @@ class VideoViewer(QWidget):
         h, w, ch = rgb_image.shape
         bytes_per_line = ch * w
         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        label_size = self.viewer_label.size()
         pixmap = QPixmap.fromImage(qt_image).scaled(
-            self.viewer_label.size(), Qt.AspectRatioMode.KeepAspectRatio
+            label_size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
         )
         self.viewer_label.setPixmap(pixmap)
 

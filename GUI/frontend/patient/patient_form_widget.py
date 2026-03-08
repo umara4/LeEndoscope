@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QDate
 
 from shared.theme import (
-    SIDE_PANEL_STYLE, NAV_BUTTON_STYLE, ACCENT_BUTTON_STYLE,
+    SIDE_PANEL_STYLE, NAV_BUTTON_STYLE,
     SCROLL_AREA_STYLE, STYLE_SECTION_FRAME, STYLE_SECTION_TITLE,
     STYLE_SEPARATOR, STYLE_BOLD_LABEL,
 )
@@ -105,11 +105,6 @@ class PatientFormWidget(QFrame):
         content_layout.addStretch()
         scroll.setWidget(content_widget)
         layout.addWidget(scroll, 1)
-
-        # Save Button at bottom
-        self.save_btn = QPushButton("Save Patient")
-        self.save_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
-        layout.addWidget(self.save_btn)
 
         self.scroll_area = scroll
 
@@ -312,9 +307,18 @@ class PatientFormWidget(QFrame):
         """Create media management fields."""
         layout = QVBoxLayout()
 
+        # Session name
+        session_label = QLabel("Session Name:")
+        session_label.setStyleSheet(STYLE_BOLD_LABEL)
+        layout.addWidget(session_label)
+
+        self.session_name_input = QLineEdit()
+        self.session_name_input.setPlaceholderText("Enter a session name...")
+        layout.addWidget(self.session_name_input)
+
         # Videos section
         videos_label = QLabel("Associated Videos:")
-        videos_label.setStyleSheet(STYLE_BOLD_LABEL)
+        videos_label.setStyleSheet(STYLE_BOLD_LABEL + " margin-top: 20px;")
         layout.addWidget(videos_label)
 
         self.videos_list = QListWidget()
@@ -327,8 +331,8 @@ class PatientFormWidget(QFrame):
         videos_btn_layout.addWidget(self.remove_video_btn)
         layout.addLayout(videos_btn_layout)
 
-        # Images section
-        images_label = QLabel("Associated Images:")
+        # IMU Data section
+        images_label = QLabel("IMU Data:")
         images_label.setStyleSheet(STYLE_BOLD_LABEL + " margin-top: 20px;")
         layout.addWidget(images_label)
 
@@ -336,7 +340,7 @@ class PatientFormWidget(QFrame):
         layout.addWidget(self.images_list)
 
         images_btn_layout = QHBoxLayout()
-        self.add_image_btn = QPushButton("Add Image")
+        self.add_image_btn = QPushButton("Add IMU Data")
         self.remove_image_btn = QPushButton("Remove Selected")
         images_btn_layout.addWidget(self.add_image_btn)
         images_btn_layout.addWidget(self.remove_image_btn)

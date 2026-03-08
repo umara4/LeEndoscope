@@ -166,8 +166,22 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
         if not user:
             QMessageBox.warning(self, "Error", "Please enter a username.")
             return
-        if self.db and self.db.verify_user(user, pwd):
-            QMessageBox.information(self, "Success", f"Welcome, {user}!")
+        if not self.db:
+            QMessageBox.warning(self, "Error", "No database connection.")
+            return
+
+        # Disable UI while verifying credentials in background
+        self._set_login_ui_enabled(False)
+
+        from backend.user_db import LoginWorker
+        self._login_worker = LoginWorker(self.db.db_path, user, pwd, parent=self)
+        self._login_worker.finished.connect(self._on_login_result)
+        self._login_worker.start()
+
+    def _on_login_result(self, success: bool, username: str):
+        self._set_login_ui_enabled(True)
+        if success:
+            QMessageBox.information(self, "Success", f"Welcome, {username}!")
             self.login_successful.emit()
 
             from frontend.app_shell import AppShell
@@ -177,6 +191,16 @@ class LoginWindow(QWidget, CenteredWidgetMixin):
             QMessageBox.warning(self, "Login failed", "Invalid username or password.")
             self.password.clear()
             self.password.setFocus()
+
+    def _set_login_ui_enabled(self, enabled: bool):
+        """Toggle login form interactivity during async verification."""
+        self.username.setEnabled(enabled)
+        self.password.setEnabled(enabled)
+        # Find the login button by searching child widgets
+        for child in self.findChildren(QPushButton):
+            if child.text() in ("Login", "Signing in..."):
+                child.setEnabled(enabled)
+                child.setText("Login" if enabled else "Signing in...")
 
     def _back_to_main(self):
         self.save_geometry_on_close()

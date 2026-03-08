@@ -30,10 +30,10 @@ from typing import Optional
 
 import cv2
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QHBoxLayout,
+    QWidget, QHBoxLayout,
     QFileDialog, QInputDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QTimer, QTime, QEvent, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QTime, QEvent, QThread, pyqtSignal
 
 try:
     import serial
@@ -50,7 +50,7 @@ from shared.form_helpers import set_button_enabled_style
 
 from backend.serial_service import SerialPortReader
 from backend.arduino_flasher import ArduinoFlasher
-from backend.extraction_service import SegmentExtractor
+from backend.extraction_service import SegmentExtractor, FullVideoExtractor, select_segment_frames
 from backend.camera_service import probe_cameras
 from backend.session_manager import sanitize_filename_component
 
@@ -60,8 +60,85 @@ from frontend.video.segment_controls import SegmentControls
 from frontend.video.serial_monitor_panel import SerialMonitorPanel
 
 
+class FileCopyWorker(QThread):
+    """Copy files in a background thread to avoid UI freezes."""
+    finished = pyqtSignal(bool, str)  # (success, error_message)
+
+    def __init__(self, copy_pairs: list, parent=None):
+        """copy_pairs: list of (source_path, dest_path) tuples."""
+        super().__init__(parent)
+        self._copy_pairs = copy_pairs
+
+    def run(self):
+        try:
+            for src, dst in self._copy_pairs:
+                shutil.copy2(str(src), str(dst))
+            self.finished.emit(True, "")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class CameraProbeWorker(QThread):
+    """Probe available cameras in a background thread."""
+    finished = pyqtSignal(list)  # list of camera indices
+
+    def run(self):
+        try:
+            cams = probe_cameras()
+        except Exception:
+            cams = []
+        self.finished.emit(cams)
+
+
+class FQBNDetectWorker(QThread):
+    """Detect board FQBN and prepare flash commands in background."""
+    finished = pyqtSignal(str, list, list)  # fqbn, compile_cmd, upload_cmd
+
+    def __init__(self, cli_path, com_port, sketch_dir, parent=None):
+        super().__init__(parent)
+        self._cli_path = cli_path
+        self._com_port = com_port
+        self._sketch_dir = sketch_dir
+
+    def run(self):
+        fqbn = self._detect_fqbn()
+        compile_cmd = [self._cli_path, "compile", "--fqbn", fqbn, str(self._sketch_dir)]
+        upload_cmd = [self._cli_path, "upload", "-p", str(self._com_port), "--fqbn", fqbn, str(self._sketch_dir)]
+        self.finished.emit(fqbn, compile_cmd, upload_cmd)
+
+    def _detect_fqbn(self) -> str:
+        default_fqbn = "esp32:esp32:esp32"
+        try:
+            proc = subprocess.run(
+                [self._cli_path, "board", "list", "--format", "json"],
+                check=False, capture_output=True, text=True, timeout=12,
+            )
+            payload = proc.stdout or ""
+            parsed = json.loads(payload) if payload.strip() else {}
+            for entry in parsed.get("detected_ports", []):
+                address = str(entry.get("port", {}).get("address", "")).strip()
+                if address.upper() != str(self._com_port).strip().upper():
+                    continue
+                for board in entry.get("matching_boards", []) or []:
+                    fqbn = str(board.get("fqbn", "")).strip()
+                    if fqbn:
+                        return fqbn
+                props = entry.get("port", {}).get("properties", {})
+                vid = str(props.get("vid", "")).strip().upper()
+                pid = str(props.get("pid", "")).strip().upper()
+                vid_n = vid if vid.startswith("0X") else f"0X{vid}"
+                pid_n = pid if pid.startswith("0X") else f"0X{pid}"
+                for (mv, mp), mapped_fqbn in ImagingPage._VID_PID_FQBN_MAP.items():
+                    if vid_n == mv.upper() and pid_n == mp.upper():
+                        return mapped_fqbn
+        except Exception:
+            pass
+        return default_fqbn
+
+
 class ImagingPage(QWidget):
     navigate_to_reconstruction = pyqtSignal()
+    recording_saved = pyqtSignal(str, str)  # video_path, imu_path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -144,7 +221,8 @@ class ImagingPage(QWidget):
         idx = self._side.layout().indexOf(self._side.segments_button) + 1
         self._side.layout().insertWidget(idx, self._segments)
 
-        main_layout.addWidget(self._side, 1)
+        main_layout.addWidget(self._side, 0)
+        self._side.setFixedWidth(240)
 
         # Video viewer
         self._viewer = VideoViewer()
@@ -153,12 +231,12 @@ class ImagingPage(QWidget):
         self._viewer.forward_button.clicked.connect(lambda: self.skip_frames(self.fps))
         self._viewer.timeline_slider.sliderReleased.connect(self.scrub_video)
         self._viewer.add_segment_requested.connect(self._on_add_segment)
-        main_layout.addWidget(self._viewer, 4)
+        main_layout.addWidget(self._viewer, 1)
 
         # Serial monitor (right side, hidden by default)
         self._serial_panel = SerialMonitorPanel()
         self._serial_panel.setVisible(False)
-        main_layout.addWidget(self._serial_panel, 2)
+        main_layout.addWidget(self._serial_panel, 1)
 
         # Serial monitor poll timer
         self._serial_monitor_timer = QTimer(self)
@@ -228,10 +306,69 @@ class ImagingPage(QWidget):
         # Reset segments
         self._segments.clear()
         self._segments.set_enabled(False)
+        self._side.segments_button.setEnabled(False)
+        set_button_enabled_style(self._side.segments_button, False)
 
         # Reset side panel buttons
         set_button_enabled_style(self._side.extract_button, False)
         set_button_enabled_style(self._side.view_frames_button, False)
+        set_button_enabled_style(self._side.reconstruct_button, False)
+        self._side.serial_monitor_button.setEnabled(False)
+        set_button_enabled_style(self._side.serial_monitor_button, False)
+
+    # ------------------------------------------------------------------
+    # Patient media loading
+    # ------------------------------------------------------------------
+    def load_patient_media(self, video_path=None, imu_path=None, session_name=None):
+        """Auto-load patient's video and IMU data without file dialogs."""
+        if not video_path:
+            return
+        video_p = Path(video_path)
+        if not video_p.exists():
+            self.log_message(f"Video not found: {video_path}")
+            return
+
+        name = session_name.strip() if session_name and session_name.strip() else video_p.stem
+        session_dir = self._create_load_session_dir(name)
+        raw_dir = session_dir / "Raw Data"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_video = raw_dir / "Recording.mp4"
+        copy_pairs = [(str(video_p), str(dest_video))]
+
+        if imu_path:
+            imu_p = Path(imu_path)
+            if imu_p.exists():
+                copy_pairs.append((str(imu_p), str(raw_dir / "IMUTimeStamp.csv")))
+
+        self.log_message("Copying patient media to session directory...")
+
+        # Store state for the callback
+        self._pending_patient_load = {
+            "session_dir": session_dir,
+            "dest_video": dest_video,
+            "video_name": video_p.name,
+        }
+
+        self._patient_copy_worker = FileCopyWorker(copy_pairs, parent=self)
+        self._patient_copy_worker.finished.connect(self._on_patient_copy_finished)
+        self._patient_copy_worker.start()
+
+    def _on_patient_copy_finished(self, success: bool, error_msg: str):
+        """Handle completion of background file copy for load_patient_media."""
+        if not success:
+            self.log_message(f"Failed to copy patient media: {error_msg}")
+            return
+
+        pending = self._pending_patient_load
+        session_dir = pending["session_dir"]
+        dest_video = pending["dest_video"]
+
+        self.log_message(f"Copied video to {dest_video.name}")
+        self.session_dir = session_dir
+        self.recording_file_path = str(dest_video)
+        self.load_video_from_path(str(dest_video))
+        self.log_message(f"Patient media loaded: {pending['video_name']}")
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -448,26 +585,51 @@ class ImagingPage(QWidget):
         raw_dir = session_dir / "Raw Data"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 7: Copy files into Raw Data/
-        try:
-            dest_video = raw_dir / "Recording.mp4"
-            shutil.copy2(str(video_path), str(dest_video))
-            self.log_message(f"Copied video to {dest_video.name}")
+        # Step 7: Copy files into Raw Data/ (background thread)
+        dest_video = raw_dir / "Recording.mp4"
+        dest_imu = raw_dir / "IMUTimeStamp.csv"
+        copy_pairs = [
+            (str(video_path), str(dest_video)),
+            (str(imu_path), str(dest_imu)),
+        ]
+        if has_frame_ts:
+            dest_frame_ts = raw_dir / "FrameTimestamp.csv"
+            copy_pairs.append((str(frame_ts_path), str(dest_frame_ts)))
 
-            dest_imu = raw_dir / "IMUTimeStamp.csv"
-            shutil.copy2(str(imu_path), str(dest_imu))
-            self.log_message(f"Copied IMU data to {dest_imu.name}")
+        self.log_message("Copying files to session directory...")
+        self._side.load_button.setEnabled(False)
 
-            if has_frame_ts:
-                dest_frame_ts = raw_dir / "FrameTimestamp.csv"
-                shutil.copy2(str(frame_ts_path), str(dest_frame_ts))
-                self.log_message(f"Copied frame timestamps to {dest_frame_ts.name}")
-        except Exception as e:
+        # Store state for the callback
+        self._pending_load = {
+            "session_dir": session_dir,
+            "dest_video": dest_video,
+            "raw_dir": raw_dir,
+            "has_frame_ts": has_frame_ts,
+        }
+
+        self._file_copy_worker = FileCopyWorker(copy_pairs, parent=self)
+        self._file_copy_worker.finished.connect(self._on_load_copy_finished)
+        self._file_copy_worker.start()
+
+    def _on_load_copy_finished(self, success: bool, error_msg: str):
+        """Handle completion of background file copy for load_video_file."""
+        self._side.load_button.setEnabled(True)
+        if not success:
             QMessageBox.critical(
                 self, "Copy Error",
-                f"Failed to copy files into session directory:\n{e}"
+                f"Failed to copy files into session directory:\n{error_msg}"
             )
             return
+
+        pending = self._pending_load
+        session_dir = pending["session_dir"]
+        dest_video = pending["dest_video"]
+        raw_dir = pending["raw_dir"]
+
+        self.log_message(f"Copied video to {dest_video.name}")
+        self.log_message(f"Copied IMU data to IMUTimeStamp.csv")
+        if pending["has_frame_ts"]:
+            self.log_message(f"Copied frame timestamps to FrameTimestamp.csv")
 
         # Step 8: Set session state
         self.session_dir = session_dir
@@ -476,6 +638,10 @@ class ImagingPage(QWidget):
         # Step 9: Load video for playback
         self.load_video_from_path(str(dest_video))
         self.log_message(f"Session loaded: {session_dir.name}")
+
+        # Push loaded media back to patient profile
+        imu_dest = str(raw_dir / "IMUTimeStamp.csv")
+        self.recording_saved.emit(str(dest_video), imu_dest if Path(imu_dest).exists() else "")
 
     def load_video_from_path(self, file_name):
         video_to_load = file_name
@@ -502,6 +668,7 @@ class ImagingPage(QWidget):
 
         set_button_enabled_style(self._side.extract_button, False)
         set_button_enabled_style(self._side.view_frames_button, False)
+        set_button_enabled_style(self._side.reconstruct_button, False)
         self.log_message("Video loaded")
 
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -511,6 +678,8 @@ class ImagingPage(QWidget):
             self._viewer.current_time_label.setText("00:00:00")
 
         self._segments.set_enabled(True)
+        self._side.segments_button.setEnabled(True)
+        set_button_enabled_style(self._side.segments_button, True)
         if self._play_timer.isActive():
             self._play_timer.stop()
         try:
@@ -641,25 +810,13 @@ class ImagingPage(QWidget):
             return
         self.log_message("Flashing Arduino with latest sketch...")
         self._serial_panel.append_text("[FLASH] Flashing Arduino with latest sketch...")
-        QApplication.processEvents()
         self._flash_latest_arduino_code(com_port, continue_setup=False)
 
     # ------------------------------------------------------------------
     # Setup system
     # ------------------------------------------------------------------
     def refresh_setup_dropdowns(self):
-        self._side.camera_combo.clear()
-        cams = []
-        try:
-            cams = probe_cameras()
-        except Exception:
-            pass
-        if not cams:
-            self._side.camera_combo.addItem("No cameras found", -1)
-        else:
-            for c in cams:
-                self._side.camera_combo.addItem(f"Camera {c}", c)
-
+        # COM ports: fast enough to stay synchronous
         self._side.comport_combo.clear()
         ports = self._get_comports()
         if not ports:
@@ -667,6 +824,23 @@ class ImagingPage(QWidget):
         else:
             for port, desc in ports:
                 self._side.comport_combo.addItem(f"{port} - {desc}" if desc else port, port)
+
+        # Cameras: probe in background thread
+        self._side.camera_combo.clear()
+        self._side.camera_combo.addItem("Scanning cameras...", -1)
+        self._side.camera_combo.setEnabled(False)
+        self._camera_probe_worker = CameraProbeWorker(parent=self)
+        self._camera_probe_worker.finished.connect(self._on_camera_probe_done)
+        self._camera_probe_worker.start()
+
+    def _on_camera_probe_done(self, cams: list):
+        self._side.camera_combo.clear()
+        self._side.camera_combo.setEnabled(True)
+        if not cams:
+            self._side.camera_combo.addItem("No cameras found", -1)
+        else:
+            for c in cams:
+                self._side.camera_combo.addItem(f"Camera {c}", c)
 
     def _get_comports(self):
         if serial is None:
@@ -700,35 +874,6 @@ class ImagingPage(QWidget):
         ("0x1A86", "0x7523"): "esp32:esp32:esp32",
     }
 
-    def _detect_fqbn_for_port(self, cli_path: str, com_port: str) -> str:
-        default_fqbn = "esp32:esp32:esp32"
-        try:
-            proc = subprocess.run(
-                [cli_path, "board", "list", "--format", "json"],
-                check=False, capture_output=True, text=True, timeout=12,
-            )
-            payload = proc.stdout or ""
-            parsed = json.loads(payload) if payload.strip() else {}
-            for entry in parsed.get("detected_ports", []):
-                address = str(entry.get("port", {}).get("address", "")).strip()
-                if address.upper() != str(com_port).strip().upper():
-                    continue
-                for board in entry.get("matching_boards", []) or []:
-                    fqbn = str(board.get("fqbn", "")).strip()
-                    if fqbn:
-                        return fqbn
-                props = entry.get("port", {}).get("properties", {})
-                vid = str(props.get("vid", "")).strip().upper()
-                pid = str(props.get("pid", "")).strip().upper()
-                vid_n = vid if vid.startswith("0X") else f"0X{vid}"
-                pid_n = pid if pid.startswith("0X") else f"0X{pid}"
-                for (mv, mp), fqbn in self._VID_PID_FQBN_MAP.items():
-                    if vid_n == mv.upper() and pid_n == mp.upper():
-                        return fqbn
-        except Exception:
-            pass
-        return default_fqbn
-
     def save_setup_and_start_camera(self):
         """Save camera/COM selections and start live preview."""
         camera_idx = self._side.camera_combo.currentData()
@@ -753,6 +898,10 @@ class ImagingPage(QWidget):
         # Enable recording
         self._side.set_recording_enabled(True)
 
+        # Enable serial monitor
+        self._side.serial_monitor_button.setEnabled(True)
+        set_button_enabled_style(self._side.serial_monitor_button, True)
+
     def _flash_latest_arduino_code(self, com_port: str, continue_setup: bool = False) -> bool:
         sketch_dir = PROJECT_ROOT / "ArduinoCode" / "sensorOutput"
         sketch_file = sketch_dir / "sensorOutput.ino"
@@ -763,13 +912,19 @@ class ImagingPage(QWidget):
         if not cli_path:
             self._serial_panel.append_text("[ERROR] arduino-cli not found.")
             return False
-        fqbn = self._detect_fqbn_for_port(cli_path, com_port)
-        self._serial_panel.append_text(f"[FLASH] Detected FQBN: {fqbn}")
-        compile_cmd = [cli_path, "compile", "--fqbn", fqbn, str(sketch_dir)]
-        upload_cmd = [cli_path, "upload", "-p", str(com_port), "--fqbn", fqbn, str(sketch_dir)]
         self._flash_pending_start_camera = continue_setup
-        self._run_flash_async(compile_cmd, upload_cmd, com_port)
+        self._serial_panel.append_text("[FLASH] Detecting board type...")
+        # Detect FQBN in background thread (avoids 12s timeout on main thread)
+        self._fqbn_worker = FQBNDetectWorker(cli_path, com_port, sketch_dir, parent=self)
+        self._fqbn_worker.finished.connect(
+            lambda fqbn, cc, uc: self._on_fqbn_detected(fqbn, cc, uc, com_port)
+        )
+        self._fqbn_worker.start()
         return True
+
+    def _on_fqbn_detected(self, fqbn: str, compile_cmd: list, upload_cmd: list, com_port: str):
+        self._serial_panel.append_text(f"[FLASH] Detected FQBN: {fqbn}")
+        self._run_flash_async(compile_cmd, upload_cmd, com_port)
 
     def _run_flash_async(self, compile_cmd, upload_cmd, com_port):
         self._is_flashing_arduino = True
@@ -1430,6 +1585,20 @@ class ImagingPage(QWidget):
         if self.recording_file_path:
             self.load_video_from_path(self.recording_file_path)
 
+        self._save_recording_to_patient()
+
+    def _save_recording_to_patient(self):
+        """Emit signal so AppShell can push recording paths to patient profile."""
+        video_path = self.recording_file_path or ""
+        imu_path = ""
+        if self.session_dir:
+            candidate = Path(self.session_dir) / "Raw Data" / "IMUTimeStamp.csv"
+            if candidate.exists():
+                imu_path = str(candidate)
+        if video_path or imu_path:
+            self.recording_saved.emit(video_path, imu_path)
+            self.log_message("Recording sent to patient profile")
+
     # ------------------------------------------------------------------
     # Extraction
     # ------------------------------------------------------------------
@@ -1445,56 +1614,87 @@ class ImagingPage(QWidget):
                 self._side.set_extract_expanded(False)
 
     def start_extraction(self):
+        """Two-phase extraction: Phase 1 extracts all frames, Phase 2 selects per-segment."""
         if not self._segments.segments:
             QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
             return
+        if not self.session_dir:
+            QMessageBox.warning(self, "No Session", "No session directory available. Load a video first.")
+            return
+
         self.pause_video()
-        self.log_message("Frame extraction started")
+        self.log_message("Starting frame extraction (Phase 1: all frames at native FPS)...")
+
         self._side.load_button.setEnabled(False)
         self._side.cancel_button.setVisible(True)
         self._side.progress_bar.setVisible(True)
         self._side.progress_bar.setValue(0)
-        self.segment_progress.clear()
-        self.completed_segments = 0
-        self.worker_threads = []
+        self._side.set_extract_expanded(True)
 
-        for seg in self._segments.segments:
+        # Phase 1: Extract all frames at native FPS
+        self._full_extractor = FullVideoExtractor(self.video_path, self.session_dir)
+        self._full_extractor.progress.connect(self._on_full_extract_progress)
+        self._full_extractor.finished_ok.connect(self._on_full_extract_done)
+        self._full_extractor.finished_error.connect(self._on_full_extract_error)
+        self._full_extractor.start()
+
+    def _on_full_extract_progress(self, pct: int):
+        """Scale Phase 1 progress to 0-70% of the total bar."""
+        self._side.progress_bar.setValue(int(pct * 0.7))
+
+    def _on_full_extract_error(self, msg: str):
+        self.log_message(f"Extraction error: {msg}")
+        self._side.progress_bar.setVisible(False)
+        self._side.cancel_button.setVisible(False)
+        self._side.load_button.setEnabled(True)
+        self._side.set_extract_expanded(False)
+        QMessageBox.critical(self, "Extraction Error", msg)
+
+    def _on_full_extract_done(self):
+        """Phase 1 complete. Run Phase 2: select frames per segment."""
+        self.log_message("All frames extracted. Selecting segment frames...")
+        all_frames_dir = Path(self.session_dir) / "All Frames"
+        ts_csv = all_frames_dir / "VideoFrameTimestamp.csv"
+        imu_csv = all_frames_dir / "IMUDataFull.csv"
+        imu_csv_path = imu_csv if imu_csv.exists() else None
+
+        total_segs = len(self._segments.segments)
+        for i, seg in enumerate(self._segments.segments):
             name = seg["name"]
+            fps = seg["fps_combo"].currentData()
             start_sec = QTime(0, 0).secsTo(seg["start"])
             end_sec = QTime(0, 0).secsTo(seg["end"])
-            start_frame = int(start_sec * self.fps)
-            end_frame = int(end_sec * self.fps)
-            frames_folder = self._segment_frames_output_dir(seg)
-            worker = SegmentExtractor(
-                self.video_path, frames_folder, start_frame, end_frame,
-                fps=2, name=name, session_dir=self.session_dir,
+            output_dir = Path(self._segment_frames_output_dir(seg))
+
+            select_segment_frames(
+                all_frames_dir, ts_csv, imu_csv_path, output_dir,
+                start_sec, end_sec, fps, self.fps,
             )
-            worker.progress.connect(self._update_segment_progress)
-            worker.finished_parsing.connect(self._on_finished_parsing)
-            self.worker_threads.append(worker)
-            worker.start()
+            # Update progress: 70% + (i+1)/total * 30%
+            pct = 70 + int(((i + 1) / total_segs) * 30)
+            self._side.progress_bar.setValue(pct)
+            self.log_message(f"Segment '{name}' frames selected at {fps} fps")
 
-    def _update_segment_progress(self, data):
-        name, value = data
-        self.segment_progress[name] = value
-        avg = sum(self.segment_progress.values()) / len(self.segment_progress)
-        self._side.progress_bar.setValue(int(avg))
-
-    def _on_finished_parsing(self, name):
-        self.completed_segments += 1
-        if self.completed_segments == len(self._segments.segments):
-            self._side.progress_bar.setVisible(False)
-            self._side.cancel_button.setVisible(False)
-            self._side.load_button.setEnabled(True)
-            set_button_enabled_style(self._side.view_frames_button, True)
-            set_button_enabled_style(self._side.extract_button, False)
-            self._side.set_extract_expanded(False)
-            self.log_message("Frame extraction finished")
-            if self.patient_id and self.patient_db:
-                self._link_extracted_frames_to_patient()
-            QMessageBox.information(self, "Done", "All segments have been extracted.")
+        # All done
+        self._side.progress_bar.setValue(100)
+        self._side.progress_bar.setVisible(False)
+        self._side.cancel_button.setVisible(False)
+        self._side.load_button.setEnabled(True)
+        set_button_enabled_style(self._side.view_frames_button, True)
+        set_button_enabled_style(self._side.extract_button, False)
+        set_button_enabled_style(self._side.reconstruct_button, True)
+        self._side.set_extract_expanded(False)
+        self.log_message("Frame extraction finished")
+        if self.patient_id and self.patient_db:
+            self._link_extracted_frames_to_patient()
+        QMessageBox.information(self, "Done", "All segments have been extracted.")
 
     def cancel_extraction(self):
+        # Stop full extractor if running
+        if hasattr(self, '_full_extractor') and self._full_extractor is not None:
+            if self._full_extractor.isRunning():
+                self._full_extractor.request_stop()
+                self._full_extractor.wait()
         for worker in self.worker_threads:
             if worker.isRunning():
                 worker.request_stop()
@@ -1518,11 +1718,13 @@ class ImagingPage(QWidget):
             for seg in self._segments.segments
         ]
         initial_selection = {folder: images.copy() for folder, images in self.selected_frames.items()}
+        all_frames_dir = str(Path(self.session_dir) / "All Frames") if self.session_dir else None
         browser = FrameBrowser(
             segments,
             video_id=self.current_video_id or self.video_path,
             parent=self,
             initial_selection=initial_selection,
+            all_frames_dir=all_frames_dir,
         )
         browser.exec()
         self.selected_frames = browser.selected_frames

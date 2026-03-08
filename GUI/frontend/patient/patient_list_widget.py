@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QPushButton, QListWidget
 
-from shared.theme import SUCCESS_BUTTON_STYLE, SIDE_PANEL_STYLE, ACCENT_BUTTON_STYLE
+from shared.theme import SUCCESS_BUTTON_STYLE, SIDE_PANEL_STYLE
 
 
 class PatientListWidget(QFrame):
@@ -28,11 +28,3 @@ class PatientListWidget(QFrame):
         # Patient List
         self.patient_list = QListWidget()
         layout.addWidget(self.patient_list)
-
-        # Add stretch to push button to bottom
-        layout.addStretch()
-
-        # Load Patient Button at bottom
-        self.go_to_surgery_btn = QPushButton("Load Patient")
-        self.go_to_surgery_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
-        layout.addWidget(self.go_to_surgery_btn)

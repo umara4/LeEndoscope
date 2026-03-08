@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidgetItem, QMessageBox, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QDate, pyqtSignal
@@ -19,6 +19,7 @@ from backend.patient_db import PatientDatabase
 
 from frontend.patient.patient_list_widget import PatientListWidget
 from frontend.patient.patient_form_widget import PatientFormWidget
+from shared.theme import ACCENT_BUTTON_STYLE
 
 
 class PatientProfilePage(QWidget):
@@ -40,20 +41,34 @@ class PatientProfilePage(QWidget):
         # Left panel - Patient list
         self.patient_list_widget = PatientListWidget()
         self.patient_list_widget.new_patient_btn.clicked.connect(self.new_patient)
-        self.patient_list_widget.go_to_surgery_btn.clicked.connect(self._on_go_to_imaging)
         self.patient_list_widget.patient_list.itemSelectionChanged.connect(self.on_patient_selected)
         content_layout.addWidget(self.patient_list_widget, 1)
 
         # Right panel - Patient form
         self.patient_form_widget = PatientFormWidget()
-        self.patient_form_widget.save_btn.clicked.connect(self.save_current_patient)
         self.patient_form_widget.add_video_btn.clicked.connect(self.add_video)
         self.patient_form_widget.remove_video_btn.clicked.connect(self.remove_video)
-        self.patient_form_widget.add_image_btn.clicked.connect(self.add_image)
-        self.patient_form_widget.remove_image_btn.clicked.connect(self.remove_image)
+        self.patient_form_widget.add_image_btn.clicked.connect(self.add_imu_data)
+        self.patient_form_widget.remove_image_btn.clicked.connect(self.remove_imu_data)
         content_layout.addWidget(self.patient_form_widget, 2)
 
         main_layout.addLayout(content_layout, 1)
+
+        # Bottom row — Load Patient and Save Patient buttons side by side
+        bottom_row = QHBoxLayout()
+        self._load_patient_btn = QPushButton("Load Patient")
+        self._load_patient_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
+        self._load_patient_btn.setFixedHeight(40)
+        self._load_patient_btn.clicked.connect(self._on_go_to_imaging)
+        bottom_row.addWidget(self._load_patient_btn, 1)
+
+        self._save_patient_btn = QPushButton("Save Patient")
+        self._save_patient_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
+        self._save_patient_btn.setFixedHeight(40)
+        self._save_patient_btn.clicked.connect(self.save_current_patient)
+        bottom_row.addWidget(self._save_patient_btn, 2)
+
+        main_layout.addLayout(bottom_row)
 
         # Load all patients
         self.refresh_patient_list()
@@ -91,6 +106,9 @@ class PatientProfilePage(QWidget):
             self.current_patient = self.db.load_patient(patient_id)
             if self.current_patient:
                 self.load_patient_into_form(self.current_patient)
+                # Media is session-only; clear DB-loaded media references
+                self.current_patient.associated_videos = []
+                self.current_patient.associated_images = []
 
     # ------------------------------------------------------------------
     # Form load / clear
@@ -133,13 +151,10 @@ class PatientProfilePage(QWidget):
         f.pre_surgery_text.setText(patient.pre_surgery_notes)
         f.post_surgery_text.setText(patient.post_surgery_notes)
 
+        # Media is session-only; always start with empty lists
         f.videos_list.clear()
-        for video in patient.associated_videos:
-            f.videos_list.addItem(video)
-
         f.images_list.clear()
-        for image in patient.associated_images:
-            f.images_list.addItem(image)
+        f.session_name_input.clear()
 
     def clear_form(self):
         f = self.patient_form_widget
@@ -181,6 +196,7 @@ class PatientProfilePage(QWidget):
 
         f.videos_list.clear()
         f.images_list.clear()
+        f.session_name_input.clear()
 
     # ------------------------------------------------------------------
     # Save
@@ -229,7 +245,7 @@ class PatientProfilePage(QWidget):
             QMessageBox.warning(self, "Error", "No patient selected or created.")
             return
         self._copy_form_to_patient()
-        self.db.save_patient(self.current_patient)
+        self._save_patient_without_media()
 
         # Refresh list and re-select the saved patient
         saved_id = self.current_patient.patient_id
@@ -252,9 +268,33 @@ class PatientProfilePage(QWidget):
     def _save_patient_silently(self):
         try:
             self._copy_form_to_patient()
-            self.db.save_patient(self.current_patient)
+            self._save_patient_without_media()
         except Exception:
             pass
+
+    def _save_patient_without_media(self):
+        """Save patient to DB without media references (media is session-only)."""
+        p = self.current_patient
+        videos_backup = p.associated_videos
+        images_backup = p.associated_images
+        p.associated_videos = []
+        p.associated_images = []
+        try:
+            self.db.save_patient(p)
+        finally:
+            p.associated_videos = videos_backup
+            p.associated_images = images_backup
+
+    def receive_recording(self, video_path: str, imu_path: str):
+        """Called by AppShell when imaging page finishes a recording."""
+        if not self.current_patient:
+            return
+        if video_path and video_path not in self.current_patient.associated_videos:
+            self.current_patient.associated_videos.append(video_path)
+            self.patient_form_widget.videos_list.addItem(video_path)
+        if imu_path and imu_path not in self.current_patient.associated_images:
+            self.current_patient.associated_images.append(imu_path)
+            self.patient_form_widget.images_list.addItem(imu_path)
 
     # ------------------------------------------------------------------
     # Navigation
@@ -263,6 +303,7 @@ class PatientProfilePage(QWidget):
         if not self.current_patient:
             QMessageBox.warning(self, "No Patient", "Please select or create a patient first.")
             return
+        self._save_patient_silently()
         self.navigate_to_imaging.emit()
 
     # ------------------------------------------------------------------
@@ -289,20 +330,20 @@ class PatientProfilePage(QWidget):
                 self.current_patient.associated_videos.remove(video_path)
             self.patient_form_widget.videos_list.takeItem(self.patient_form_widget.videos_list.row(item))
 
-    def add_image(self):
+    def add_imu_data(self):
         if not self.current_patient:
             QMessageBox.warning(self, "Error", "No patient selected or created.")
             return
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "",
-            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff);;All Files (*)"
+            self, "Select IMU Data", "",
+            "CSV Files (*.csv);;All Files (*)"
         )
         if file_path:
             self.patient_form_widget.images_list.addItem(file_path)
             if file_path not in self.current_patient.associated_images:
                 self.current_patient.associated_images.append(file_path)
 
-    def remove_image(self):
+    def remove_imu_data(self):
         item = self.patient_form_widget.images_list.currentItem()
         if item:
             image_path = item.text()

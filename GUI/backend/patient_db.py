@@ -7,6 +7,7 @@ On first use, auto-migrates data from patients_data.json if it exists.
 from __future__ import annotations
 import json
 import sqlite3
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -142,15 +143,30 @@ class PatientDatabase:
         return patient
 
     def load_all_patients(self) -> List[PatientProfile]:
-        """Load all patient profiles."""
+        """Load all patient profiles using batch queries (3 total)."""
         cur = self._conn.cursor()
         cur.execute("SELECT * FROM patients ORDER BY last_modified DESC")
+        desc = cur.description
         rows = cur.fetchall()
+
+        # Batch-load all videos and images in 2 queries instead of 2*N
+        videos_by_pid: dict[str, list[str]] = defaultdict(list)
+        for pid, path in self._conn.execute(
+            "SELECT patient_id, video_path FROM patient_videos ORDER BY id"
+        ):
+            videos_by_pid[pid].append(path)
+
+        images_by_pid: dict[str, list[str]] = defaultdict(list)
+        for pid, path in self._conn.execute(
+            "SELECT patient_id, image_path FROM patient_images ORDER BY id"
+        ):
+            images_by_pid[pid].append(path)
+
         patients = []
         for row in rows:
-            p = self._row_to_profile(cur.description, row)
-            p.associated_videos = self._load_videos(p.patient_id)
-            p.associated_images = self._load_images(p.patient_id)
+            p = self._row_to_profile(desc, row)
+            p.associated_videos = videos_by_pid.get(p.patient_id, [])
+            p.associated_images = images_by_pid.get(p.patient_id, [])
             patients.append(p)
         return patients
 

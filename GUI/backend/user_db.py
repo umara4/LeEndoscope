@@ -13,6 +13,8 @@ import hashlib
 import secrets
 from typing import Optional
 
+from PyQt6.QtCore import QThread, pyqtSignal
+
 from shared.constants import USER_DB_PATH, ADMIN_PASSWORD
 
 
@@ -198,3 +200,23 @@ class UserDatabase:
 
     def close(self) -> None:
         self._conn.close()
+
+
+class LoginWorker(QThread):
+    """Run PBKDF2 password verification off the main thread."""
+    finished = pyqtSignal(bool, str)  # (success, username)
+
+    def __init__(self, db_path, username: str, password: str, parent=None):
+        super().__init__(parent)
+        self._db_path = db_path
+        self._username = username
+        self._password = password
+
+    def run(self):
+        try:
+            db = UserDatabase(self._db_path)
+            ok = db.verify_user(self._username, self._password)
+            db.close()
+            self.finished.emit(ok, self._username)
+        except Exception:
+            self.finished.emit(False, self._username)

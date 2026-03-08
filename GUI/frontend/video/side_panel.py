@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QTextEdit, QProgressBar, QWidget,
 )
 
-from shared.theme import SIDE_PANEL_STYLE, TERMINAL_DISPLAY_STYLE, TERMINAL_LABEL_STYLE, STYLE_BOLD_LABEL
+from shared.theme import SIDE_PANEL_STYLE, TERMINAL_DISPLAY_STYLE, STYLE_BOLD_LABEL
 from shared.form_helpers import set_button_enabled_style
 from frontend.video.recording_panel import RecordingPanel
 
@@ -96,6 +96,8 @@ class SidePanel(QFrame):
         # --- Serial Monitor toggle ---
         self.serial_monitor_button = QPushButton("Serial Monitor")
         self.serial_monitor_button.setFixedHeight(40)
+        self.serial_monitor_button.setEnabled(False)
+        set_button_enabled_style(self.serial_monitor_button, False)
         layout.addWidget(self.serial_monitor_button)
 
         # --- Recording (collapsible) ---
@@ -112,6 +114,8 @@ class SidePanel(QFrame):
         # --- Segments (collapsible) ---
         self.segments_button = QPushButton("Segments")
         self.segments_button.setFixedHeight(40)
+        self.segments_button.setEnabled(False)
+        set_button_enabled_style(self.segments_button, False)
         layout.addWidget(self.segments_button)
 
         # Segment list is owned by SegmentControls, inserted by coordinator
@@ -150,21 +154,26 @@ class SidePanel(QFrame):
         # --- Start Reconstruction ---
         self.reconstruct_button = QPushButton("Start Reconstruction")
         self.reconstruct_button.setFixedHeight(40)
+        self.reconstruct_button.setEnabled(False)
+        set_button_enabled_style(self.reconstruct_button, False)
         layout.addWidget(self.reconstruct_button)
 
-        # --- Spacer ---
-        layout.addStretch(1)
-
-        # --- Terminal ---
-        terminal_label = QLabel("Terminal")
-        terminal_label.setStyleSheet(TERMINAL_LABEL_STYLE)
-        layout.addWidget(terminal_label)
+        # --- Terminal (collapsible, starts open) ---
+        self.terminal_collapsed = False
+        self.terminal_button = QPushButton("Terminal \u25bc")
+        self.terminal_button.setFixedHeight(40)
+        self.terminal_button.clicked.connect(self.toggle_terminal)
+        layout.addWidget(self.terminal_button)
 
         self.terminal_display = QTextEdit()
         self.terminal_display.setReadOnly(True)
-        self.terminal_display.setFixedHeight(120)
         self.terminal_display.setStyleSheet(TERMINAL_DISPLAY_STYLE)
-        layout.addWidget(self.terminal_display)
+        self.terminal_display.setVisible(True)
+        layout.addWidget(self.terminal_display, 10)
+
+        # Bottom stretch absorbs extra space when collapsible sections are closed,
+        # keeping all buttons packed towards the top.
+        layout.addStretch(1)
 
     # --- Toggle helpers ---
     def toggle_flash(self):
@@ -181,6 +190,11 @@ class SidePanel(QFrame):
         self.recording_collapsed = not self.recording_collapsed
         self.recording_panel.setVisible(not self.recording_collapsed)
         self.recording_button.setText("Recording \u25bc" if not self.recording_collapsed else "Recording")
+
+    def toggle_terminal(self):
+        self.terminal_collapsed = not self.terminal_collapsed
+        self.terminal_display.setVisible(not self.terminal_collapsed)
+        self.terminal_button.setText("Terminal \u25bc" if not self.terminal_collapsed else "Terminal")
 
     def set_recording_enabled(self, enabled: bool):
         self.recording_button.setEnabled(enabled)
