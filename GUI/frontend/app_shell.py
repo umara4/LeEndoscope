@@ -189,6 +189,13 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
         # Cleanup imaging page (serial, etc.)
         self._imaging_page.cleanup()
 
+        # Cleanup reconstruction page (SSH + viewer shutdown)
+        if self._reconstruction_loaded and hasattr(self, "_reconstruction_page"):
+            try:
+                self._reconstruction_page.cleanup()
+            except Exception:
+                pass
+
         self._flush_geometry_save()
 
         from frontend.auth.login_window import MainLoginWindow
@@ -206,5 +213,10 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
             self._imaging_page.cleanup()
         except Exception:
             pass
+        if self._reconstruction_loaded and hasattr(self, "_reconstruction_page"):
+            try:
+                self._reconstruction_page.cleanup()
+            except Exception:
+                pass
         self._flush_geometry_save()
         super().closeEvent(event)

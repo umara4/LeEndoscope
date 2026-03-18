@@ -55,7 +55,6 @@ SLIDER_HANDLE = ACCENT_PRIMARY
 SLIDER_HANDLE_BORDER = ACCENT_DARK
 SEGMENT_HIGHLIGHT = "#4CAF50"
 VIEWER_BG = BG_BASE
-PYVISTA_BG = BG_BASE
 
 # 1g. Button Default (non-accent standard buttons)
 BTN_DEFAULT_BG = "#3A3A4E"
@@ -582,45 +581,11 @@ STYLE_VIEWER_CONTAINER = f"""
     }}
 """
 
-# Reconstruction overlay buttons
-STYLE_ZOOM_BTN = (
-    f"background: rgba(30,30,46,0.85); border-radius: 16px; "
-    f"font-weight: bold; font-size: 18px; color: {TEXT_PRIMARY};"
-)
-
-STYLE_MANIP_BTN = f"""
-    QPushButton {{
-        background-color: {BG_BASE};
-        color: {TEXT_SECONDARY};
-        border: none;
-        border-radius: {RADIUS_MD};
-    }}
-    QPushButton:hover {{
-        background-color: {BG_ELEVATED};
-    }}
-    QPushButton:pressed {{
-        background-color: {BG_SURFACE};
-    }}
-"""
-
-STYLE_MANIP_HOME_BTN = f"""
-    QPushButton {{
-        background-color: {BG_BASE};
-        color: {TEXT_SECONDARY};
-        border: 1px solid {BORDER_DEFAULT};
-        border-radius: {RADIUS_MD};
-        font-size: 10px;
-        font-weight: bold;
-    }}
-    QPushButton:hover {{
-        background-color: {BG_ELEVATED};
-    }}
-    QPushButton:pressed {{
-        background-color: {BG_SURFACE};
-    }}
-"""
-
-STYLE_MANIP_FRAME = f"#manipulator {{ background-color: {BG_BASE}; border-radius: {RADIUS_LG}; }}"
+# Nerfstudio viewer status labels
+STYLE_STATUS_CONNECTED = f"color: {SUCCESS}; font-weight: bold; font-size: {FONT_SIZE_BODY};"
+STYLE_STATUS_DISCONNECTED = f"color: {TEXT_MUTED}; font-size: {FONT_SIZE_BODY};"
+STYLE_STATUS_ERROR = f"color: {ERROR}; font-weight: bold; font-size: {FONT_SIZE_BODY};"
+STYLE_STATUS_LOADING = f"color: {WARNING}; font-size: {FONT_SIZE_BODY};"
 
 # Playback control buttons (<<, play/pause, >>)
 STYLE_PLAYBACK_BTN = f"""

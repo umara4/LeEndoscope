@@ -1558,11 +1558,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self.selected_frames = browser.selected_frames
 
     def start_reconstruction(self):
-        self._flush_geometry_save()
-        try:
-            from frontend.reconstruction.reconstruction_window import ReconstructionWindow
-        except Exception as e:
-            QMessageBox.warning(self, "Cannot Open Reconstruction", f"Failed to import reconstruction UI: {e}")
-            return
-        self.recon_window = ReconstructionWindow(parent=self)
-        self.recon_window.show()
+        QMessageBox.information(
+            self, "Reconstruction",
+            "Use the Reconstruction tab in the main application window "
+            "to launch the Nerfstudio viewer.",
+        )

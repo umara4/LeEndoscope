@@ -1,546 +1,430 @@
 """
-3D Reconstruction Viewer page (QWidget for embedding in AppShell).
+Nerfstudio Reconstruction Viewer page (QWidget for embedding in AppShell).
 
-Adapted from reconstruction_window.py. All 3D rendering logic is preserved.
-Navigation and geometry are handled by the parent AppShell.
+Replaces the former PyVista point-cloud viewer. Connects to a remote server
+via SSH, launches the Nerfstudio viewer (ns-viewer), tunnels the websocket
+port locally, and displays the web-based viewer inside a QWebEngineView.
 """
 from __future__ import annotations
 
-import os
-import math
-import struct
-import zlib
-import gzip
-from pathlib import Path
+from datetime import datetime
 
-import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFileDialog, QFrame, QMessageBox, QGridLayout, QStyle
+    QPushButton, QLabel, QFrame, QLineEdit, QTextEdit,
+    QMessageBox, QInputDialog,
 )
-from PyQt6.QtCore import Qt, QEvent, QSize
+from PyQt6.QtCore import Qt, QUrl
 
 from shared.theme import (
-    SIDE_PANEL_STYLE, STYLE_VIEWER_CONTAINER, STYLE_ZOOM_BTN,
-    STYLE_MANIP_FRAME, STYLE_MANIP_BTN, STYLE_MANIP_HOME_BTN,
-    PYVISTA_BG, BG_BASE, TEXT_SECONDARY,
+    SIDE_PANEL_STYLE, STYLE_VIEWER_CONTAINER, TERMINAL_DISPLAY_STYLE,
+    STYLE_BOLD_LABEL, ACCENT_BUTTON_STYLE,
+    STYLE_STATUS_CONNECTED, STYLE_STATUS_DISCONNECTED,
+    STYLE_STATUS_ERROR, STYLE_STATUS_LOADING,
+    BG_BASE, TEXT_SECONDARY,
+)
+from shared.constants import (
+    NERFSTUDIO_SSH_HOST, NERFSTUDIO_SSH_USER, NERFSTUDIO_SSH_PORT,
+    NERFSTUDIO_DEFAULT_CONFIG_PATH, NERFSTUDIO_VIEWER_PORT,
+    NERFSTUDIO_LOCAL_PORT, NERFSTUDIO_HEALTH_CHECK_INTERVAL_S,
 )
 
+# QWebEngineView is optional -- gracefully degrade if not installed.
 try:
-    import importlib
-    _lz4frame = importlib.import_module("lz4.frame")
-    LZ4_AVAILABLE = True
-except Exception:
-    _lz4frame = None
-    LZ4_AVAILABLE = False
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    WEBENGINE_AVAILABLE = True
+except ImportError:
+    QWebEngineView = None
+    WEBENGINE_AVAILABLE = False
 
+# paramiko availability is checked at connection time via the worker.
 try:
-    import pyvista as pv
-    from pyvistaqt import QtInteractor
-    PYVISTA_AVAILABLE = True
-except Exception:
-    PYVISTA_AVAILABLE = False
+    from backend.ssh_service import (
+        SSHConnectionWorker,
+        NerfstudioViewerWorker,
+        ViewerHealthChecker,
+        PARAMIKO_AVAILABLE,
+    )
+except ImportError:
+    PARAMIKO_AVAILABLE = False
 
 
 class ReconstructionPage(QWidget):
-    SUPPORTED_FILTER = "3D Files (*.ply *.pcd *.obj *.stl *.off *.xyz);;All Files (*)"
+    """Nerfstudio viewer page for 3D reconstruction visualization.
+
+    Connects to the remote server via SSH, launches ns-viewer, and
+    embeds the web viewer in a QWebEngineView.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        main_layout = QHBoxLayout(self)
+        # --- State ---
+        self._ssh_client = None
+        self._ssh_password: str | None = None
+        self._viewer_worker: NerfstudioViewerWorker | None = None
+        self._health_checker: ViewerHealthChecker | None = None
+        self._connection_worker: SSHConnectionWorker | None = None
+        self._viewer_url: str | None = None
+        self._is_connected = False
+        self._is_viewer_running = False
 
+        self._build_ui()
+
+    # ==================================================================
+    # UI Construction
+    # ==================================================================
+
+    def _build_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(8)
+
+        # ---------- Side panel (stretch=1) ----------
         side_panel = QFrame(self)
         side_panel.setStyleSheet(SIDE_PANEL_STYLE)
         side_layout = QVBoxLayout(side_panel)
-        side_layout.setContentsMargins(8, 8, 8, 8)
-        side_layout.setSpacing(8)
+        side_layout.setContentsMargins(10, 10, 10, 10)
+        side_layout.setSpacing(6)
 
-        self.load_btn = QPushButton("Load Render", side_panel)
-        self.load_btn.clicked.connect(self.on_load)
-        side_layout.addWidget(self.load_btn)
+        # -- SSH connection section --
+        ssh_header = QLabel("Remote Server")
+        ssh_header.setStyleSheet(STYLE_BOLD_LABEL)
+        side_layout.addWidget(ssh_header)
 
-        self.fit_btn = QPushButton("Fit View", side_panel)
-        self.fit_btn.clicked.connect(self._fit_view)
-        side_layout.addWidget(self.fit_btn)
+        self._host_label = QLabel(f"Host: {NERFSTUDIO_SSH_HOST}")
+        self._host_label.setWordWrap(True)
+        side_layout.addWidget(self._host_label)
 
-        self.info_label = QLabel("No geometry loaded.", side_panel)
-        self.info_label.setWordWrap(True)
-        side_layout.addWidget(self.info_label)
-        side_layout.addStretch(1)
+        self._connect_btn = QPushButton("Connect to Server")
+        self._connect_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
+        self._connect_btn.setFixedHeight(34)
+        self._connect_btn.clicked.connect(self._on_connect_clicked)
+        side_layout.addWidget(self._connect_btn)
 
+        self._connection_status = QLabel("Disconnected")
+        self._connection_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
+        self._connection_status.setWordWrap(True)
+        side_layout.addWidget(self._connection_status)
+
+        # Subtle divider
+        divider1 = QFrame()
+        divider1.setFrameShape(QFrame.Shape.HLine)
+        divider1.setFixedHeight(1)
+        side_layout.addWidget(divider1)
+
+        # -- Nerfstudio viewer section --
+        viewer_header = QLabel("Nerfstudio Viewer")
+        viewer_header.setStyleSheet(STYLE_BOLD_LABEL)
+        side_layout.addWidget(viewer_header)
+
+        config_label = QLabel("Config path (remote):")
+        side_layout.addWidget(config_label)
+
+        self._config_input = QLineEdit()
+        self._config_input.setText(NERFSTUDIO_DEFAULT_CONFIG_PATH)
+        self._config_input.setPlaceholderText("/path/to/outputs/.../config.yml")
+        side_layout.addWidget(self._config_input)
+
+        # Button row: Launch | Stop
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self._launch_btn = QPushButton("Launch Viewer")
+        self._launch_btn.setFixedHeight(34)
+        self._launch_btn.setEnabled(False)
+        self._launch_btn.clicked.connect(self._on_launch_clicked)
+        btn_row.addWidget(self._launch_btn)
+
+        self._stop_btn = QPushButton("Stop Viewer")
+        self._stop_btn.setFixedHeight(34)
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        btn_row.addWidget(self._stop_btn)
+
+        side_layout.addLayout(btn_row)
+
+        self._reload_btn = QPushButton("Reload Page")
+        self._reload_btn.setFixedHeight(34)
+        self._reload_btn.setEnabled(False)
+        self._reload_btn.clicked.connect(self._on_reload_clicked)
+        side_layout.addWidget(self._reload_btn)
+
+        self._viewer_status = QLabel("Viewer: Not running")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
+        self._viewer_status.setWordWrap(True)
+        side_layout.addWidget(self._viewer_status)
+
+        # Subtle divider
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.Shape.HLine)
+        divider2.setFixedHeight(1)
+        side_layout.addWidget(divider2)
+
+        # -- Log panel --
+        log_label = QLabel("Log")
+        log_label.setStyleSheet(STYLE_BOLD_LABEL)
+        side_layout.addWidget(log_label)
+
+        self._log_display = QTextEdit()
+        self._log_display.setReadOnly(True)
+        self._log_display.setStyleSheet(TERMINAL_DISPLAY_STYLE)
+        side_layout.addWidget(self._log_display, stretch=1)
+
+        # ---------- Viewer container (stretch=4) ----------
         viewer_container = QWidget(self)
         viewer_container.setStyleSheet(STYLE_VIEWER_CONTAINER)
         viewer_layout = QVBoxLayout(viewer_container)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.placeholder = QLabel("PyVista interactive view not available.", viewer_container)
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.placeholder.setStyleSheet(f"background-color: {BG_BASE}; color: {TEXT_SECONDARY}; border: none;")
+        self._placeholder = QLabel(
+            "Connect to server and launch the Nerfstudio viewer\n"
+            "to see your 3D reconstruction here."
+        )
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet(
+            f"background-color: {BG_BASE}; color: {TEXT_SECONDARY}; "
+            f"border: none; font-size: 14px;"
+        )
 
-        self.plotter = None
-        if PYVISTA_AVAILABLE:
-            try:
-                self.plotter = QtInteractor(viewer_container)
-                self.plotter.set_background(PYVISTA_BG)
-                viewer_layout.addWidget(self.plotter, stretch=1)
-                try:
-                    self.plotter.show_axes()
-                except Exception:
-                    pass
-            except Exception:
-                self.plotter = None
-                viewer_layout.addWidget(self.placeholder, stretch=1)
-        else:
-            viewer_layout.addWidget(self.placeholder, stretch=1)
+        self._web_view = None
+        if WEBENGINE_AVAILABLE:
+            self._web_view = QWebEngineView(viewer_container)
+            self._web_view.setVisible(False)
+            viewer_layout.addWidget(self._web_view, stretch=1)
+        viewer_layout.addWidget(self._placeholder, stretch=1)
 
         main_layout.addWidget(side_panel, stretch=1)
         main_layout.addWidget(viewer_container, stretch=4)
 
-        self.mesh = None
-        self._manip = None
-        self._zoom_controls = None
-        self.cam_center = (0.0, 0.0, 0.0)
-        self.cam_dist = 1.0
-        self.cam_az = 45.0
-        self.cam_el = 30.0
-
-        if not PYVISTA_AVAILABLE:
+        # -- Availability checks --
+        if not WEBENGINE_AVAILABLE:
+            self._log("PyQt6-WebEngine is not installed.")
+            self._connect_btn.setEnabled(False)
             QMessageBox.information(
-                self,
-                "Missing Dependency",
-                "pyvista and pyvistaqt are required. Install with: pip install pyvista pyvistaqt vtk"
+                self, "Missing Dependency",
+                "PyQt6-WebEngine is required for the Nerfstudio viewer.\n"
+                "Install with: pip install PyQt6-WebEngine",
             )
-            self.load_btn.setEnabled(False)
-            self.fit_btn.setEnabled(False)
-        else:
-            self._create_manipulator()
-            self._create_zoom_controls()
+        if not PARAMIKO_AVAILABLE:
+            self._log("paramiko is not installed.")
+            self._connect_btn.setEnabled(False)
 
-    def _read_pcd(self, filename):
-        with open(filename, "rb") as fh:
-            header_lines = []
-            while True:
-                line = fh.readline()
-                if not line:
-                    break
-                try:
-                    s = line.decode("utf-8").strip()
-                except Exception:
-                    s = line.decode("latin-1").strip()
-                header_lines.append(s)
-                if s.lower().startswith("data"):
-                    data_tokens = s.split()
-                    data_type = data_tokens[1].lower() if len(data_tokens) > 1 else "binary"
-                    break
+    # ==================================================================
+    # Logging helper
+    # ==================================================================
 
-            def _get(prefix):
-                for ln in header_lines:
-                    if ln.lower().startswith(prefix):
-                        return ln.split()[1:]
-                return None
+    def _log(self, message: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_display.append(f"[{ts}] {message}")
+        # Auto-scroll to bottom
+        sb = self._log_display.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
 
-            fields = _get("fields") or _get("field")
-            size = _get("size")
-            types = _get("type")
-            count = _get("count")
-            points_tok = _get("points")
-            width_tok = _get("width")
-            height_tok = _get("height")
+    # ==================================================================
+    # SSH Connection
+    # ==================================================================
 
-            num_points = None
-            if points_tok:
-                try:
-                    num_points = int(points_tok[0])
-                except Exception:
-                    num_points = None
-            else:
-                try:
-                    w = int(width_tok[0]) if width_tok else 0
-                    h = int(height_tok[0]) if height_tok else 0
-                    num_points = w * h if (w and h) else None
-                except Exception:
-                    num_points = None
-
-            if data_type == "ascii":
-                rest = fh.read().decode("utf-8", errors="ignore").splitlines()
-                pts = []
-                fields_l = [f.lower() for f in fields] if fields else []
-                try:
-                    x_i = fields_l.index("x") if "x" in fields_l else 0
-                    y_i = fields_l.index("y") if "y" in fields_l else 1
-                    z_i = fields_l.index("z") if "z" in fields_l else 2
-                except Exception:
-                    x_i, y_i, z_i = 0, 1, 2
-                for row in rest:
-                    row = row.strip()
-                    if not row or row.startswith("#"):
-                        continue
-                    parts = row.split()
-                    if len(parts) <= max(x_i, y_i, z_i):
-                        continue
-                    try:
-                        x = float(parts[x_i])
-                        y = float(parts[y_i])
-                        z = float(parts[z_i])
-                    except Exception:
-                        continue
-                    pts.append((x, y, z))
-                if not pts:
-                    raise ValueError("No points parsed from ASCII PCD.")
-                return pv.PolyData(np.asarray(pts, dtype=float))
-
-            raw = None
-            uncomp_size = None
-            if data_type.startswith("binary_compressed"):
-                hdr = fh.read(8)
-                if len(hdr) != 8:
-                    raise ValueError("Invalid binary_compressed PCD header.")
-                comp_size, uncomp_size = struct.unpack("<II", hdr)
-                comp = fh.read(int(comp_size))
-                if len(comp) != int(comp_size):
-                    raise ValueError("Unexpected EOF reading compressed payload.")
-
-                decompressed = None
-                try:
-                    decompressed = zlib.decompress(comp)
-                except Exception:
-                    pass
-                if decompressed is None:
-                    try:
-                        decompressed = gzip.decompress(comp)
-                    except Exception:
-                        pass
-                if decompressed is None and LZ4_AVAILABLE:
-                    try:
-                        decompressed = _lz4frame.decompress(comp)
-                    except Exception:
-                        pass
-                if decompressed is None:
-                    try:
-                        decompressed = zlib.decompress(comp, wbits=-zlib.MAX_WBITS)
-                    except Exception:
-                        pass
-                if decompressed is None:
-                    raise ValueError("Failed to decompress binary_compressed PCD payload.")
-                raw = decompressed
-
-            if data_type.startswith("binary"):
-                if not (fields and size and types):
-                    raise ValueError("Incomplete PCD header for binary parsing.")
-                sizes = [int(x) for x in size]
-                types_l = [t.upper() for t in types]
-                counts = [int(c) for c in count] if count else [1] * len(fields)
-                bytes_per_point = sum(sizes[i] * counts[i] for i in range(len(sizes)))
-                if num_points is None:
-                    if uncomp_size:
-                        num_points = int(uncomp_size) // bytes_per_point
-                    else:
-                        cur = fh.tell()
-                        fh.seek(0, os.SEEK_END)
-                        total = fh.tell()
-                        data_size = total - cur
-                        fh.seek(cur, os.SEEK_SET)
-                        num_points = max(0, data_size // bytes_per_point)
-                expected = int(num_points * bytes_per_point)
-                if raw is None:
-                    raw = fh.read(expected)
-                if len(raw) < expected:
-                    avail = len(raw) // bytes_per_point
-                    if avail == 0:
-                        raise ValueError("No binary point data available.")
-                    raw = raw[: avail * bytes_per_point]
-                    num_points = avail
-
-                dtype_elems = []
-                for i, fname in enumerate(fields):
-                    fsize = sizes[i]
-                    ftype = types_l[i]
-                    fcount = counts[i]
-                    if ftype == "F":
-                        base = "<f4" if fsize == 4 else "<f8"
-                    elif ftype == "I":
-                        base = {1: "<i1", 2: "<i2", 4: "<i4", 8: "<i8"}[fsize]
-                    elif ftype == "U":
-                        base = {1: "<u1", 2: "<u2", 4: "<u4", 8: "<u8"}[fsize]
-                    else:
-                        raise ValueError(f"Unsupported PCD field type: {ftype}")
-                    if fcount == 1:
-                        dtype_elems.append((fname, base))
-                    else:
-                        dtype_elems.append((fname, base, (fcount,)))
-
-                structured = np.frombuffer(raw, dtype=np.dtype(dtype_elems))
-                fields_l = [f.lower() for f in fields]
-                try:
-                    xi = fields_l.index("x")
-                    yi = fields_l.index("y")
-                    zi = fields_l.index("z")
-                except ValueError:
-                    xi, yi, zi = 0, 1, 2
-                names = structured.dtype.names
-
-                def _get_arr(name):
-                    if name in names:
-                        arr = structured[name]
-                    else:
-                        if isinstance(name, (bytes, bytearray)):
-                            arr = structured[name.decode()]
-                        else:
-                            raise ValueError(f"Missing field {name}")
-                    if getattr(arr, "ndim", 0) == 2:
-                        arr = arr[:, 0]
-                    return np.asarray(arr)
-
-                def _to_float(a):
-                    a = np.asarray(a)
-                    if a.dtype.kind in ("i", "u", "f"):
-                        return a.astype(float)
-                    if a.dtype.kind in ("S", "U"):
-                        out = []
-                        for v in a:
-                            try:
-                                sv = v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
-                                out.append(float(sv))
-                            except Exception:
-                                out.append(np.nan)
-                        return np.array(out, dtype=float)
-                    out = []
-                    for v in a:
-                        try:
-                            out.append(float(v))
-                        except Exception:
-                            try:
-                                vv = np.asarray(v)
-                                out.append(float(vv.ravel()[0]))
-                            except Exception:
-                                out.append(np.nan)
-                    return np.array(out, dtype=float)
-
-                x = _get_arr(fields[xi])
-                y = _get_arr(fields[yi])
-                z = _get_arr(fields[zi])
-
-                x_f = _to_float(x)
-                y_f = _to_float(y)
-                z_f = _to_float(z)
-
-                mask = np.isfinite(x_f) & np.isfinite(y_f) & np.isfinite(z_f)
-                pts = np.vstack((x_f[mask], y_f[mask], z_f[mask])).T
-                return pv.PolyData(pts)
-
-            raise ValueError(f"Unsupported PCD DATA type: {data_type}")
-
-    def on_load(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Load Render", str(Path.home()), self.SUPPORTED_FILTER)
-        if not fname:
-            return
-        try:
-            ext = Path(fname).suffix.lower()
-            if ext == ".pcd":
-                mesh = self._read_pcd(fname)
-            else:
-                mesh = pv.read(fname)
-                mesh = pv.wrap(mesh)
-        except Exception as e:
-            QMessageBox.warning(self, "Load Error", f"Failed to read file:\n{e}")
+    def _on_connect_clicked(self):
+        if self._is_connected:
+            self._disconnect_ssh()
             return
 
-        if mesh is None or getattr(mesh, "n_points", 0) == 0:
-            QMessageBox.warning(self, "Empty Geometry", "Loaded geometry is empty.")
-            return
+        # Prompt for password (reuse cached if available)
+        if not self._ssh_password:
+            password, ok = QInputDialog.getText(
+                self, "SSH Password",
+                f"Password for {NERFSTUDIO_SSH_USER}@{NERFSTUDIO_SSH_HOST}:",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok or not password:
+                self._log("Connection cancelled.")
+                return
+            self._ssh_password = password
 
-        self.mesh = mesh
-        self._display_mesh(mesh)
-        self.info_label.setText(
-            f"Loaded: {os.path.basename(fname)} — points: {mesh.n_points}, faces: {getattr(mesh, 'n_faces', 0)}"
+        self._connect_btn.setEnabled(False)
+        self._connection_status.setText("Connecting...")
+        self._connection_status.setStyleSheet(STYLE_STATUS_LOADING)
+        self._log(f"Connecting to {NERFSTUDIO_SSH_HOST}...")
+
+        self._connection_worker = SSHConnectionWorker(
+            NERFSTUDIO_SSH_HOST, NERFSTUDIO_SSH_USER,
+            self._ssh_password, NERFSTUDIO_SSH_PORT,
         )
+        self._connection_worker.connected.connect(self._on_ssh_connected)
+        self._connection_worker.connection_failed.connect(self._on_ssh_failed)
+        self._connection_worker.start()
 
-    def _display_mesh(self, mesh):
-        if self.plotter is None:
-            return
-        try:
-            self.plotter.clear()
-            self.plotter.remove_actor("*")
-        except Exception:
-            pass
+    def _on_ssh_connected(self, client):
+        self._ssh_client = client
+        self._is_connected = True
+        self._connect_btn.setEnabled(True)
+        self._connect_btn.setText("Disconnect")
+        self._launch_btn.setEnabled(True)
+        self._connection_status.setText(f"Connected to {NERFSTUDIO_SSH_HOST}")
+        self._connection_status.setStyleSheet(STYLE_STATUS_CONNECTED)
+        self._log("SSH connection established.")
 
-        try:
-            if getattr(mesh, "n_faces", 0) > 0:
-                if "RGB" in mesh.point_data:
-                    self.plotter.add_mesh(mesh, scalars="RGB", rgb=True)
-                else:
-                    self.plotter.add_mesh(mesh, show_edges=False, smooth_shading=True)
-            else:
-                if "RGB" in mesh.point_data:
-                    self.plotter.add_points(mesh, scalars="RGB", rgb=True, point_size=1)
-                else:
-                    self.plotter.add_points(mesh.points, point_size=1)
+    def _on_ssh_failed(self, error_msg: str):
+        self._ssh_password = None  # clear bad password
+        self._connect_btn.setEnabled(True)
+        self._connection_status.setText(f"Failed: {error_msg}")
+        self._connection_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._log(f"Connection failed: {error_msg}")
+        QMessageBox.warning(self, "SSH Connection Failed", error_msg)
 
-            self.plotter.reset_camera()
-            self.plotter.render()
-        except Exception as ex:
-            QMessageBox.warning(self, "Render Error", f"Failed to render mesh:\n{ex}")
-
-    def _zoom(self, factor):
-        if factor > 0:
-            self.cam_dist = max(0.01, self.cam_dist * 0.8)
-        else:
-            self.cam_dist = self.cam_dist * 1.25
-        self._apply_camera()
-
-    def _create_zoom_controls(self):
-        if self.plotter is None:
-            return
-        interactor = self.plotter.interactor
-
-        self._zoom_controls = QFrame(interactor)
-        self._zoom_controls.setObjectName("zoom_controls")
-        self._zoom_controls.setStyleSheet("QFrame { background: transparent; }")
-        self._zoom_controls.setFixedSize(QSize(80, 40))
-
-        zoom_layout = QHBoxLayout(self._zoom_controls)
-        zoom_layout.setContentsMargins(4, 4, 4, 4)
-        zoom_layout.setSpacing(4)
-
-        btn_zoom_in = QPushButton("+")
-        btn_zoom_in.setFixedSize(36, 32)
-        btn_zoom_in.setStyleSheet(STYLE_ZOOM_BTN)
-        btn_zoom_in.clicked.connect(lambda: self._zoom(1))
-
-        btn_zoom_out = QPushButton("-")
-        btn_zoom_out.setFixedSize(36, 32)
-        btn_zoom_out.setStyleSheet(STYLE_ZOOM_BTN)
-        btn_zoom_out.clicked.connect(lambda: self._zoom(-1))
-
-        zoom_layout.addWidget(btn_zoom_in)
-        zoom_layout.addWidget(btn_zoom_out)
-
-        self._zoom_controls.raise_()
-        interactor.installEventFilter(self)
-        self._position_zoom_controls()
-
-    def _create_manipulator(self):
-        if self.plotter is None:
-            return
-        interactor = self.plotter.interactor
-
-        self._manip = QFrame(interactor)
-        self._manip.setObjectName("manipulator")
-        self._manip.setStyleSheet(STYLE_MANIP_FRAME)
-        self._manip.setFixedSize(QSize(140, 140))
-        grid = QGridLayout(self._manip)
-        grid.setContentsMargins(8, 8, 8, 8)
-
-        btn_up = QPushButton()
-        btn_up.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
-        btn_down = QPushButton()
-        btn_down.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
-        btn_left = QPushButton()
-        btn_left.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
-        btn_right = QPushButton()
-        btn_right.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
-
-        btn_center = QPushButton("Home")
-
-        for b in (btn_up, btn_down, btn_left, btn_right):
-            b.setFixedSize(36, 36)
-            b.setStyleSheet(STYLE_MANIP_BTN)
-
-        btn_center.setFixedSize(36, 36)
-        btn_center.setStyleSheet(STYLE_MANIP_HOME_BTN)
-
-        grid.addWidget(btn_up, 0, 1)
-        grid.addWidget(btn_left, 1, 0)
-        grid.addWidget(btn_center, 1, 1)
-        grid.addWidget(btn_right, 1, 2)
-        grid.addWidget(btn_down, 2, 1)
-
-        btn_left.clicked.connect(lambda: self._orbit(delta_az=-15))
-        btn_right.clicked.connect(lambda: self._orbit(delta_az=15))
-        btn_up.clicked.connect(lambda: self._orbit(delta_el=10))
-        btn_down.clicked.connect(lambda: self._orbit(delta_el=-10))
-        btn_center.clicked.connect(self._fit_view)
-
-        self._manip.raise_()
-        interactor.installEventFilter(self)
-        self._position_manip()
-
-    def eventFilter(self, watched, event):
-        if self.plotter is not None and watched is self.plotter.interactor and event.type() == QEvent.Type.Resize:
-            self._position_manip()
-            self._position_zoom_controls()
-        return super().eventFilter(watched, event)
-
-    def _position_manip(self):
-        if self.plotter is None or self._manip is None:
-            return
-        pw = self.plotter.interactor.width()
-        ph = self.plotter.interactor.height()
-        mw = self._manip.width()
-        mh = self._manip.height()
-        margin = 12
-        x = max(0, pw - mw - margin)
-        y = max(0, ph - mh - margin)
-        self._manip.move(x, y)
-
-    def _position_zoom_controls(self):
-        if self.plotter is None or self._zoom_controls is None:
-            return
-        pw = self.plotter.interactor.width()
-        ph = self.plotter.interactor.height()
-        zw = self._zoom_controls.width()
-        zh = self._zoom_controls.height()
-        margin = 12
-        manip_x = max(0, pw - 140 - margin)
-        x = manip_x + (140 - zw) // 2
-        y = max(0, ph - 140 - zh - margin - 8)
-        self._zoom_controls.move(x, y)
-
-    def _orbit(self, delta_az=0.0, delta_el=0.0):
-        self.cam_az = (self.cam_az + delta_az) % 360.0
-        self.cam_el = max(-89.0, min(89.0, self.cam_el + delta_el))
-        self._apply_camera()
-
-    def _fit_view(self):
-        if self.mesh is None:
-            self.cam_center = (0.0, 0.0, 0.0)
-            self.cam_dist = 1.0
-        else:
+    def _disconnect_ssh(self):
+        self._stop_viewer()
+        if self._ssh_client:
             try:
-                bounds = self.mesh.bounds
-                span = max(bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4])
-                self.cam_dist = max(1e-6, span * 1.5)
-                self.cam_center = (
-                    0.5*(bounds[0]+bounds[1]),
-                    0.5*(bounds[2]+bounds[3]),
-                    0.5*(bounds[4]+bounds[5])
-                )
-            except Exception:
-                self.cam_center = (0.0, 0.0, 0.0)
-                self.cam_dist = 1.0
-        self.cam_az = 45.0
-        self.cam_el = 30.0
-        self._apply_camera()
-
-    def _apply_camera(self):
-        if self.plotter is None:
-            return
-        az_r = math.radians(self.cam_az)
-        el_r = math.radians(self.cam_el)
-        r = max(1e-6, float(self.cam_dist))
-        cx, cy, cz = self.cam_center
-        cam_x = cx + r * math.cos(el_r) * math.cos(az_r)
-        cam_y = cy + r * math.cos(el_r) * math.sin(az_r)
-        cam_z = cz + r * math.sin(el_r)
-        try:
-            self.plotter.camera_position = [(cam_x, cam_y, cam_z), tuple(self.cam_center), (0, 0, 1)]
-            self.plotter.render()
-        except Exception:
-            try:
-                self.plotter.camera.position = (cam_x, cam_y, cam_z)
-                self.plotter.camera.focal_point = tuple(self.cam_center)
-                self.plotter.camera.up = (0, 0, 1)
-                self.plotter.render()
+                self._ssh_client.close()
             except Exception:
                 pass
+            self._ssh_client = None
+        self._is_connected = False
+        self._connect_btn.setText("Connect to Server")
+        self._launch_btn.setEnabled(False)
+        self._connection_status.setText("Disconnected")
+        self._connection_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
+        self._log("Disconnected from server.")
+
+    # ==================================================================
+    # Viewer Launch / Stop
+    # ==================================================================
+
+    def _on_launch_clicked(self):
+        config_path = self._config_input.text().strip()
+        if not config_path:
+            QMessageBox.warning(
+                self, "Missing Config",
+                "Enter the remote path to a Nerfstudio config file.",
+            )
+            return
+
+        if not self._ssh_client:
+            QMessageBox.warning(self, "Not Connected", "Connect to the server first.")
+            return
+
+        self._launch_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._viewer_status.setText("Starting viewer...")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_LOADING)
+        self._log(f"Launching ns-viewer with config: {config_path}")
+
+        self._viewer_worker = NerfstudioViewerWorker(
+            ssh_client=self._ssh_client,
+            config_path=config_path,
+            remote_host=NERFSTUDIO_SSH_HOST,
+            local_port=NERFSTUDIO_LOCAL_PORT,
+            viewer_port=NERFSTUDIO_VIEWER_PORT,
+        )
+        self._viewer_worker.output_line.connect(self._on_viewer_output)
+        self._viewer_worker.viewer_ready.connect(self._on_viewer_ready)
+        self._viewer_worker.viewer_failed.connect(self._on_viewer_failed)
+        self._viewer_worker.viewer_stopped.connect(self._on_viewer_stopped)
+        self._viewer_worker.start()
+
+    def _on_viewer_output(self, line: str):
+        self._log(line)
+
+    def _on_viewer_ready(self, url: str):
+        self._viewer_url = url
+        self._is_viewer_running = True
+        self._reload_btn.setEnabled(True)
+        self._viewer_status.setText(f"Running at {url}")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_CONNECTED)
+        self._log(f"Viewer ready at {url}")
+
+        # Load the viewer URL in QWebEngineView
+        if self._web_view:
+            self._web_view.setUrl(QUrl(url))
+            self._web_view.setVisible(True)
+            self._placeholder.setVisible(False)
+
+        # Start health monitoring
+        self._health_checker = ViewerHealthChecker(
+            url, interval_s=NERFSTUDIO_HEALTH_CHECK_INTERVAL_S,
+        )
+        self._health_checker.health_check_failed.connect(self._on_health_failed)
+        self._health_checker.start()
+
+    def _on_viewer_failed(self, error: str):
+        self._is_viewer_running = False
+        self._launch_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        self._reload_btn.setEnabled(False)
+        self._viewer_status.setText(f"Failed: {error}")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._log(f"Viewer failed: {error}")
+        self._show_placeholder()
+        QMessageBox.warning(self, "Viewer Error", error)
+
+    def _on_viewer_stopped(self):
+        self._is_viewer_running = False
+        self._launch_btn.setEnabled(self._is_connected)
+        self._stop_btn.setEnabled(False)
+        self._reload_btn.setEnabled(False)
+        self._viewer_status.setText("Viewer stopped")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
+        self._log("Viewer stopped.")
+        self._show_placeholder()
+
+    def _on_stop_clicked(self):
+        self._log("Stopping viewer...")
+        self._stop_viewer()
+
+    def _stop_viewer(self):
+        # Stop health checker
+        if self._health_checker and self._health_checker.isRunning():
+            self._health_checker.request_stop()
+            self._health_checker.wait(2000)
+        self._health_checker = None
+
+        # Stop viewer worker
+        if self._viewer_worker and self._viewer_worker.isRunning():
+            self._viewer_worker.request_stop()
+            self._viewer_worker.wait(5000)
+        self._viewer_worker = None
+
+        self._is_viewer_running = False
+        self._viewer_url = None
+        self._launch_btn.setEnabled(self._is_connected)
+        self._stop_btn.setEnabled(False)
+        self._reload_btn.setEnabled(False)
+        self._viewer_status.setText("Viewer: Not running")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
+        self._show_placeholder()
+
+    def _show_placeholder(self):
+        if self._web_view:
+            self._web_view.setVisible(False)
+        self._placeholder.setVisible(True)
+
+    # ==================================================================
+    # Reload / Health
+    # ==================================================================
+
+    def _on_reload_clicked(self):
+        if self._web_view and self._viewer_url:
+            self._log("Reloading viewer page.")
+            self._web_view.reload()
+
+    def _on_health_failed(self, reason: str):
+        self._viewer_status.setText(f"Warning: {reason}")
+        self._viewer_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._log(f"Health check: {reason}")
+
+    # ==================================================================
+    # Cleanup (called by AppShell on logout / window close)
+    # ==================================================================
+
+    def cleanup(self):
+        self._stop_viewer()
+        if self._ssh_client:
+            try:
+                self._ssh_client.close()
+            except Exception:
+                pass
+            self._ssh_client = None
+        self._is_connected = False

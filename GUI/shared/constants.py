@@ -61,3 +61,17 @@ DEFAULT_WINDOW_HEIGHT = 700
 # ---------------------------------------------------------------------------
 import os
 ADMIN_PASSWORD = os.environ.get("LEENDOSCOPE_ADMIN_PASS", "admin")
+
+# ---------------------------------------------------------------------------
+# Remote Server / Nerfstudio
+# ---------------------------------------------------------------------------
+NERFSTUDIO_SSH_HOST = os.environ.get("LEENDOSCOPE_SSH_HOST", "adax.cas.mcmaster.ca")
+NERFSTUDIO_SSH_USER = os.environ.get("LEENDOSCOPE_SSH_USER", "divitob")
+NERFSTUDIO_SSH_PORT = 22
+NERFSTUDIO_WORKING_DIR = "/nfs/u50/capstone/mt4tb6g23/divitob"
+NERFSTUDIO_CONDA_ENV = "nerfstudio"
+NERFSTUDIO_DEFAULT_CONFIG_PATH = ""            # User fills in per-session
+NERFSTUDIO_VIEWER_PORT = 7007                  # Default ns-viewer port on remote
+NERFSTUDIO_LOCAL_PORT = 7007                   # Local port for SSH tunnel
+NERFSTUDIO_VIEWER_STARTUP_TIMEOUT_S = 120      # Max wait for viewer to start
+NERFSTUDIO_HEALTH_CHECK_INTERVAL_S = 15        # Seconds between health pings
