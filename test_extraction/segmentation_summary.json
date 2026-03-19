@@ -1,0 +1,50 @@
+{
+  "video_path": "Megaflap1Postoperative_SM_9.26.25_MX.mp4",
+  "extraction_rate_fps": 5,
+  "total_frames": 433,
+  "selected_count": 364,
+  "rejected_count": 69,
+  "selection_rate_percent": 84.06466512702079,
+  "thresholds": {
+    "snr_db": 2.5,
+    "sharpness": 25,
+    "specular": 0.05
+  },
+  "statistics": {
+    "snr": {
+      "mean": 6.2032924170829915,
+      "std": 2.9627271655241967,
+      "min": -5.744610609184042,
+      "max": 11.085408596965529,
+      "threshold": 2.5
+    },
+    "sharpness": {
+      "combined": {
+        "mean": 610.7725332093131,
+        "std": 3115.896696134877,
+        "min": 5.882245666945957,
+        "max": 19112.24773790681,
+        "threshold": 25
+      },
+      "laplacian": {
+        "mean": 1037.8129182621901,
+        "std": 5322.780174996078,
+        "min": 7.471985289512829,
+        "max": 32638.232356053468
+      },
+      "texture": {
+        "mean": 183.7321481564362,
+        "std": 909.0563426332101,
+        "min": 3.5389349580846092,
+        "max": 5586.263119760152
+      }
+    },
+    "specular": {
+      "mean": 0.02152375267680694,
+      "std": 0.07713528324137361,
+      "min": 0.0,
+      "max": 0.44240121580547115,
+      "threshold": 0.05
+    }
+  }
+}

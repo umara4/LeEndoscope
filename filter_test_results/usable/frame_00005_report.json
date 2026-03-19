@@ -1,0 +1,14 @@
+{
+  "filename": "frame_00005.jpg",
+  "quality_score": 43.3,
+  "blur_score": 167.31,
+  "brightness_mean": 1.63,
+  "brightness_std": 19.58,
+  "glare_coverage_pct": 0.57,
+  "bubble_coverage_pct": 0.0,
+  "occlusion_coverage_pct": 0.0,
+  "is_usable": true,
+  "warnings": [
+    "UNDEREXPOSED: mean brightness=1.6"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "filename": "frame_00047.jpg",
+  "quality_score": 41.4,
+  "blur_score": 24.6,
+  "brightness_mean": 41.53,
+  "brightness_std": 46.38,
+  "glare_coverage_pct": 0.14,
+  "bubble_coverage_pct": 13.96,
+  "occlusion_coverage_pct": 0.05,
+  "is_usable": false,
+  "warnings": [
+    "LOW SHARPNESS: Laplacian variance=24.6 (threshold 80). Frame may be out of focus or motion-blurred.",
+    "UNDEREXPOSED: mean brightness=41.5",
+    "BUBBLES DETECTED: 14.0% coverage.",
+    "FRAME REJECTED: quality score=41.4 is below usable threshold."
+  ]
+}
