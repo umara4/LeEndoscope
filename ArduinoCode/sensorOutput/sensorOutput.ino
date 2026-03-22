@@ -62,7 +62,7 @@ void setup() {
   while (!Serial) delay(10);
 
   Wire.begin();               // ESP32 default SDA/SCL pins
-  Wire.setClock(100000);      // fast I2C helps at higher rates
+  Wire.setClock(400000);      // 400 kHz fast-mode I2C (BNO055 supports it)
 
   if (!bno.begin()) {
     Serial.println("ERROR: BNO055 not detected. Check wiring/address.");
@@ -142,5 +142,4 @@ void loop() {
   Serial.print(a.y(), 8); Serial.print(',');
   // linear acceleration along sensor z-axis
   Serial.println(a.z(), 8);
-  delay(50);
 }

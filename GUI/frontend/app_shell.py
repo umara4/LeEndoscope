@@ -48,7 +48,6 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
 
         # Page-access gating flags
         self._imaging_unlocked = False
-        self._reconstruction_unlocked = False
         self._reconstruction_loaded = False
 
         # --- Central widget ---
@@ -71,9 +70,8 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
             nav_bar.addWidget(btn, stretch=1)
             self._tab_buttons.append(btn)
 
-        # Imaging, Reconstruction, and Export tabs start locked
+        # Imaging and Export tabs start locked; Reconstruction is always available
         self._tab_buttons[1].setEnabled(False)
-        self._tab_buttons[2].setEnabled(False)
         self._tab_buttons[3].setEnabled(False)
 
         root_layout.addLayout(nav_bar)
@@ -117,11 +115,21 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
             return
         if idx == 1 and not self._imaging_unlocked:
             return
-        if idx == 2 and not self._reconstruction_unlocked:
-            return
+        if idx == 2:
+            self._ensure_reconstruction_loaded()
         if idx == 3:
             return  # Export not yet implemented
         self._switch_to(idx)
+
+    def _ensure_reconstruction_loaded(self):
+        """Lazy-load the ReconstructionPage on first visit."""
+        if not self._reconstruction_loaded:
+            from frontend.reconstruction.reconstruction_page import ReconstructionPage
+            self._reconstruction_page = ReconstructionPage()
+            self._stack.removeWidget(self._reconstruction_placeholder)
+            self._reconstruction_placeholder.deleteLater()
+            self._stack.insertWidget(2, self._reconstruction_page)
+            self._reconstruction_loaded = True
 
     def _unlock_and_go_to_imaging(self):
         self._imaging_unlocked = True
@@ -150,16 +158,9 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
 
         self._switch_to(1)
 
-    def _unlock_and_go_to_reconstruction(self):
-        self._reconstruction_unlocked = True
-        self._tab_buttons[2].setEnabled(True)
-        if not self._reconstruction_loaded:
-            from frontend.reconstruction.reconstruction_page import ReconstructionPage
-            self._reconstruction_page = ReconstructionPage()
-            self._stack.removeWidget(self._reconstruction_placeholder)
-            self._reconstruction_placeholder.deleteLater()
-            self._stack.insertWidget(2, self._reconstruction_page)
-            self._reconstruction_loaded = True
+    def _unlock_and_go_to_reconstruction(self, session_info: dict):
+        self._ensure_reconstruction_loaded()
+        self._reconstruction_page.set_session_info(session_info)
         self._switch_to(2)
 
     def _switch_to(self, idx: int):

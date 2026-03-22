@@ -2,7 +2,18 @@
 Application entrypoint.
 """
 import sys
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
+
+# Enable shared OpenGL contexts for QWebEngineView (required for WebGL).
+# QtWebEngineWidgets must also be imported before QApplication is created.
+QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+try:
+    from PyQt6 import QtWebEngineWidgets  # noqa: F401
+except ImportError:
+    pass
+
 from PyQt6.QtGui import QFont
 
 from shared.theme import APP_STYLESHEET

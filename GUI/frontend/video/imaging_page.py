@@ -50,7 +50,7 @@ from shared.form_helpers import set_button_enabled_style
 
 from backend.serial_service import SerialPortReader
 from backend.arduino_flasher import ArduinoFlasher
-from backend.extraction_service import SegmentExtractor, FullVideoExtractor, select_segment_frames
+from backend.extraction_service import SegmentExtractor, WholeVideoExtractor, SegmentCSVGenerator
 from backend.camera_service import probe_cameras
 from backend.session_manager import sanitize_filename_component
 
@@ -137,7 +137,7 @@ class FQBNDetectWorker(QThread):
 
 
 class ImagingPage(QWidget):
-    navigate_to_reconstruction = pyqtSignal()
+    navigate_to_reconstruction = pyqtSignal(dict)
     recording_saved = pyqtSignal(str, str)  # video_path, imu_path
 
     def __init__(self, parent=None):
@@ -657,6 +657,18 @@ class ImagingPage(QWidget):
         self.current_frame = 0
         self.selected_frames = {}
 
+        # Load recording FPS from metadata if available
+        self.recording_fps = self.fps
+        if self.session_dir:
+            metadata_path = Path(self.session_dir) / "Raw Data" / "recording_metadata.json"
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    self.recording_fps = float(meta.get("recording_fps", self.fps))
+                except Exception:
+                    pass
+
         self._viewer.timeline_slider.setMaximum(max(0, self.total_frames - 1))
         self._viewer.timeline_slider.setEnabled(True)
         self._segments.clear()
@@ -666,7 +678,7 @@ class ImagingPage(QWidget):
         self._viewer.total_time_label.setText(self._viewer.seconds_to_time(duration_seconds))
         self._viewer.set_video_duration(duration_seconds)
 
-        set_button_enabled_style(self._side.extract_button, False)
+        set_button_enabled_style(self._side.extract_button, True)
         set_button_enabled_style(self._side.view_frames_button, False)
         set_button_enabled_style(self._side.reconstruct_button, False)
         self.log_message("Video loaded")
@@ -1407,7 +1419,7 @@ class ImagingPage(QWidget):
         session_dir.mkdir(parents=True, exist_ok=True)
         out_path = session_dir / "Recording.mp4"
 
-        self._record_out_fps = float(DEFAULT_RECORDING_FPS)
+        self._record_out_fps = float(self._side.recording_panel.get_recording_fps())
         self._record_frame_interval = 1.0 / self._record_out_fps
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -1434,6 +1446,7 @@ class ImagingPage(QWidget):
         self._side.recording_panel.start_btn.setEnabled(False)
         self._side.recording_panel.stop_btn.setEnabled(True)
         self._side.recording_panel.start_btn.setText("Recording...")
+        self._side.recording_panel.fps_input.setEnabled(False)
 
         self._viewer.timeline_slider.setEnabled(True)
         self._viewer.timeline_slider.setMaximum(0)
@@ -1552,6 +1565,7 @@ class ImagingPage(QWidget):
         self._side.recording_panel.start_btn.setEnabled(True)
         self._side.recording_panel.stop_btn.setEnabled(False)
         self._side.recording_panel.start_btn.setText("Start Recording")
+        self._side.recording_panel.fps_input.setEnabled(True)
 
         # Move recording files to Raw Data
         try:
@@ -1569,6 +1583,19 @@ class ImagingPage(QWidget):
                     if src.exists():
                         shutil.move(str(src), str(raw_dir / name))
                 self.log_message(f"Recording files moved to {raw_dir.name}/")
+                # Save recording metadata
+                try:
+                    metadata = {
+                        "recording_fps": self._record_out_fps,
+                        "total_frames": int(self._record_frame_index),
+                        "duration_ms": float(self._record_last_frame_ts_ms),
+                    }
+                    metadata_path = raw_dir / "recording_metadata.json"
+                    with open(metadata_path, "w", encoding="utf-8") as f:
+                        json.dump(metadata, f, indent=2)
+                    self.log_message(f"Recording metadata saved ({self._record_out_fps} fps)")
+                except Exception as e:
+                    self.log_message(f"Warning: Could not save recording metadata: {e}")
         except Exception as e:
             self.log_message(f"Warning: Could not move recording files: {e}")
 
@@ -1581,6 +1608,8 @@ class ImagingPage(QWidget):
             )
         elif frame_last_ms is not None:
             self.log_message(f"Sync summary: frames={frame_count}, frame_end={frame_last_ms:.1f} ms; IMU rows={imu_count}")
+
+        self.recording_fps = self._record_out_fps
 
         if self.recording_file_path:
             self.load_video_from_path(self.recording_file_path)
@@ -1603,9 +1632,6 @@ class ImagingPage(QWidget):
     # Extraction
     # ------------------------------------------------------------------
     def _toggle_extract(self):
-        if not self._segments.segments:
-            QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
-            return
         if self._side.extract_button.isEnabled():
             if self._side.extract_collapsed:
                 self._side.set_extract_expanded(True)
@@ -1614,16 +1640,13 @@ class ImagingPage(QWidget):
                 self._side.set_extract_expanded(False)
 
     def start_extraction(self):
-        """Two-phase extraction: Phase 1 extracts all frames, Phase 2 selects per-segment."""
-        if not self._segments.segments:
-            QMessageBox.warning(self, "No Segments", "Please define at least one segment before extracting.")
-            return
+        """Phase 1: Extract ALL frames from the video. Phase 2 (segment CSVs) runs on completion."""
         if not self.session_dir:
             QMessageBox.warning(self, "No Session", "No session directory available. Load a video first.")
             return
 
         self.pause_video()
-        self.log_message("Starting frame extraction (Phase 1: all frames at native FPS)...")
+        self.log_message("Starting full-video frame extraction...")
 
         self._side.load_button.setEnabled(False)
         self._side.cancel_button.setVisible(True)
@@ -1631,70 +1654,75 @@ class ImagingPage(QWidget):
         self._side.progress_bar.setValue(0)
         self._side.set_extract_expanded(True)
 
-        # Phase 1: Extract all frames at native FPS
-        self._full_extractor = FullVideoExtractor(self.video_path, self.session_dir)
-        self._full_extractor.progress.connect(self._on_full_extract_progress)
-        self._full_extractor.finished_ok.connect(self._on_full_extract_done)
-        self._full_extractor.finished_error.connect(self._on_full_extract_error)
-        self._full_extractor.start()
+        session_path = Path(self.session_dir)
+        frames_dir = session_path / "Output Data" / "Frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
-    def _on_full_extract_progress(self, pct: int):
-        """Scale Phase 1 progress to 0-70% of the total bar."""
-        self._side.progress_bar.setValue(int(pct * 0.7))
+        self._whole_video_extractor = WholeVideoExtractor(
+            video_path=self.video_path,
+            output_folder=str(frames_dir),
+            session_dir=self.session_dir,
+        )
+        self._whole_video_extractor.progress.connect(self._side.progress_bar.setValue)
+        self._whole_video_extractor.finished.connect(self._on_whole_extraction_finished)
+        self.worker_threads = [self._whole_video_extractor]
+        self._whole_video_extractor.start()
 
-    def _on_full_extract_error(self, msg: str):
-        self.log_message(f"Extraction error: {msg}")
-        self._side.progress_bar.setVisible(False)
-        self._side.cancel_button.setVisible(False)
-        self._side.load_button.setEnabled(True)
-        self._side.set_extract_expanded(False)
-        QMessageBox.critical(self, "Extraction Error", msg)
+    def _on_whole_extraction_finished(self, success: bool):
+        """Phase 2: Generate per-segment CSVs after all frames are extracted."""
+        if not success:
+            self._side.progress_bar.setVisible(False)
+            self._side.cancel_button.setVisible(False)
+            self._side.load_button.setEnabled(True)
+            self._side.set_extract_expanded(False)
+            self.log_message("Frame extraction cancelled or failed.")
+            return
 
-    def _on_full_extract_done(self):
-        """Phase 1 complete. Run Phase 2: select frames per segment."""
-        self.log_message("All frames extracted. Selecting segment frames...")
-        all_frames_dir = Path(self.session_dir) / "All Frames"
-        ts_csv = all_frames_dir / "VideoFrameTimestamp.csv"
-        imu_csv = all_frames_dir / "IMUDataFull.csv"
-        imu_csv_path = imu_csv if imu_csv.exists() else None
+        self.log_message("Full-video frame extraction complete.")
 
-        total_segs = len(self._segments.segments)
-        for i, seg in enumerate(self._segments.segments):
-            name = seg["name"]
-            fps = seg["fps_combo"].currentData()
-            start_sec = QTime(0, 0).secsTo(seg["start"])
-            end_sec = QTime(0, 0).secsTo(seg["end"])
-            output_dir = Path(self._segment_frames_output_dir(seg))
+        # Phase 2: generate per-segment CSVs (fast, synchronous)
+        session_path = Path(self.session_dir)
+        frames_dir = session_path / "Output Data" / "Frames"
+        frames_index_csv = str(frames_dir / "frame_index.csv")
 
-            select_segment_frames(
-                all_frames_dir, ts_csv, imu_csv_path, output_dir,
-                start_sec, end_sec, fps, self.fps,
-            )
-            # Update progress: 70% + (i+1)/total * 30%
-            pct = 70 + int(((i + 1) / total_segs) * 30)
-            self._side.progress_bar.setValue(pct)
-            self.log_message(f"Segment '{name}' frames selected at {fps} fps")
+        if self._segments.segments:
+            for seg in self._segments.segments:
+                name = seg["name"]
+                fps = seg["fps_combo"].currentData()
+                start_sec = QTime(0, 0).secsTo(seg["start"])
+                end_sec = QTime(0, 0).secsTo(seg["end"])
+                start_frame = int(start_sec * self.fps)
+                end_frame = int(end_sec * self.fps)
+                seg_output_dir = self._segment_frames_output_dir(seg)
 
-        # All done
+                generator = SegmentCSVGenerator(
+                    frames_index_csv=frames_index_csv,
+                    segment_output_dir=seg_output_dir,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                    extraction_fps=fps,
+                    video_fps=self.fps,
+                    segment_name=name,
+                    session_dir=self.session_dir,
+                )
+                count = generator.generate()
+                self.log_message(f"Segment '{name}': {count} frames mapped at {fps} fps")
+
+        # Finalize
         self._side.progress_bar.setValue(100)
         self._side.progress_bar.setVisible(False)
         self._side.cancel_button.setVisible(False)
         self._side.load_button.setEnabled(True)
         set_button_enabled_style(self._side.view_frames_button, True)
-        set_button_enabled_style(self._side.extract_button, False)
+        set_button_enabled_style(self._side.extract_button, True)
         set_button_enabled_style(self._side.reconstruct_button, True)
         self._side.set_extract_expanded(False)
-        self.log_message("Frame extraction finished")
+        self.log_message("Frame extraction finished.")
         if self.patient_id and self.patient_db:
             self._link_extracted_frames_to_patient()
-        QMessageBox.information(self, "Done", "All segments have been extracted.")
+        QMessageBox.information(self, "Done", "Frame extraction complete.")
 
     def cancel_extraction(self):
-        # Stop full extractor if running
-        if hasattr(self, '_full_extractor') and self._full_extractor is not None:
-            if self._full_extractor.isRunning():
-                self._full_extractor.request_stop()
-                self._full_extractor.wait()
         for worker in self.worker_threads:
             if worker.isRunning():
                 worker.request_stop()
@@ -1713,21 +1741,66 @@ class ImagingPage(QWidget):
         if not self.video_path:
             QMessageBox.warning(self, "No Video", "Load a video before viewing frames.")
             return
-        segments = [
-            (seg["name"], self._segment_frames_output_dir(seg))
-            for seg in self._segments.segments
-        ]
+
+        session_path = Path(self.session_dir) if self.session_dir else None
+        frames_dir = session_path / "Output Data" / "Frames" if session_path else None
+
+        segments = []
+        if frames_dir and frames_dir.exists():
+            # Always show "All Frames" tab
+            segments.append(("All Frames", str(frames_dir)))
+            # Add per-segment filtered tabs
+            for seg in self._segments.segments:
+                seg_dir = self._segment_frames_output_dir(seg)
+                csv_path = Path(seg_dir) / "segment_frames.csv"
+                if csv_path.exists():
+                    segments.append((seg["name"], str(frames_dir), str(csv_path)))
+
+        if not segments:
+            QMessageBox.warning(self, "No Frames", "No extracted frames found. Extract frames first.")
+            return
+
         initial_selection = {folder: images.copy() for folder, images in self.selected_frames.items()}
-        all_frames_dir = str(Path(self.session_dir) / "All Frames") if self.session_dir else None
         browser = FrameBrowser(
             segments,
             video_id=self.current_video_id or self.video_path,
             parent=self,
             initial_selection=initial_selection,
-            all_frames_dir=all_frames_dir,
         )
         browser.exec()
         self.selected_frames = browser.selected_frames
 
     def start_reconstruction(self):
-        self.navigate_to_reconstruction.emit()
+        terminal_text = self._side.terminal_display.toPlainText()
+        self.navigate_to_reconstruction.emit({"terminal_log": terminal_text})
+
+    def _build_session_info(self) -> dict | None:
+        """Collect session paths for the reconstruction page."""
+        if self.session_dir is None:
+            return None
+
+        session_dir = Path(self.session_dir)
+        frames_dir = session_dir / "Output Data" / "Frames"
+        if not frames_dir.is_dir():
+            return None
+
+        segments = []
+        for seg in self._segments.segments:
+            seg_dir = self._segment_frames_output_dir(seg)
+            csv_path = Path(seg_dir) / "segment_frames.csv"
+            if csv_path.exists():
+                segments.append({
+                    "name": seg["name"],
+                    "segment_csv_path": str(csv_path),
+                    "frames_dir": str(frames_dir),
+                })
+
+        if not segments:
+            return None
+
+        return {
+            "session_dir": str(session_dir),
+            "session_name": self.session_name or session_dir.name,
+            "frames_dir": str(frames_dir),
+            "segments": segments,
+        }

@@ -34,6 +34,8 @@ from shared.constants import (
 
 # Regex to detect the viewer URL in ns-viewer stdout
 _URL_RE = re.compile(r"https?://[\w.-]+:\d+")
+# Strip ANSI escape sequences (PTY output includes colors/formatting)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07")
 
 
 class SSHConnectionWorker(QThread):
@@ -141,7 +143,7 @@ class NerfstudioViewerWorker(QThread):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", local_port))
-        server.listen(5)
+        server.listen(128)
         server.settimeout(1.0)
         self._forward_server = server
 
@@ -170,40 +172,49 @@ class NerfstudioViewerWorker(QThread):
 
     @staticmethod
     def _relay(sock: socket.socket, channel):
-        """Bidirectional relay between a local socket and an SSH channel."""
-        try:
-            while True:
-                # channel.recv_ready / sock-based polling (Windows-safe)
-                if channel.recv_ready():
-                    data = channel.recv(4096)
+        """Bidirectional relay using two threads — one per direction."""
+        def _remote_to_local():
+            try:
+                while True:
+                    data = channel.recv(65536)
                     if not data:
                         break
                     sock.sendall(data)
-                if channel.recv_stderr_ready():
-                    channel.recv_stderr(4096)  # discard
-                # Poll the local socket with a short timeout
-                sock.setblocking(False)
+            except Exception:
+                pass
+            finally:
                 try:
-                    data = sock.recv(4096)
+                    sock.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+
+        def _local_to_remote():
+            try:
+                while True:
+                    data = sock.recv(65536)
                     if not data:
                         break
                     channel.sendall(data)
-                except BlockingIOError:
+            except Exception:
+                pass
+            finally:
+                try:
+                    channel.shutdown(2)
+                except Exception:
                     pass
-                finally:
-                    sock.setblocking(True)
-                time.sleep(0.005)
+
+        t = threading.Thread(target=_remote_to_local, daemon=True)
+        t.start()
+        _local_to_remote()  # run in current thread
+        t.join(timeout=5)
+        try:
+            sock.close()
         except Exception:
             pass
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
-            try:
-                channel.close()
-            except Exception:
-                pass
+        try:
+            channel.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Main run
@@ -233,11 +244,14 @@ class NerfstudioViewerWorker(QThread):
             return
 
         # 3. Execute ns-viewer on the remote host
+        config = self._config_path.rstrip("/")
+        if not config.endswith((".yml", ".yaml")):
+            config = config + "/config.yml"
         cmd = (
             f'bash -lc "'
             f"cd {NERFSTUDIO_WORKING_DIR} && "
             f"conda activate {NERFSTUDIO_CONDA_ENV} && "
-            f"ns-viewer --load-config {self._config_path} "
+            f"ns-viewer --load-config {config} "
             f"--viewer.websocket-port {self._viewer_port}"
             f'"'
         )
@@ -258,6 +272,7 @@ class NerfstudioViewerWorker(QThread):
 
         # 4. Monitor stdout for viewer URL
         viewer_url = None
+        _signalled = False
         start_time = time.time()
         buf = ""
 
@@ -266,20 +281,25 @@ class NerfstudioViewerWorker(QThread):
                 # Check timeout
                 elapsed = time.time() - start_time
                 if viewer_url is None and elapsed > NERFSTUDIO_VIEWER_STARTUP_TIMEOUT_S:
+                    _signalled = True
                     self.viewer_failed.emit(
                         f"Viewer did not start within {NERFSTUDIO_VIEWER_STARTUP_TIMEOUT_S}s."
                     )
-                    self._cleanup()
                     return
 
                 # Check if remote process exited
                 if self._channel.exit_status_ready():
                     code = self._channel.recv_exit_status()
-                    # Drain remaining output
+                    # Drain remaining output (including partial buf)
                     while self._channel.recv_ready():
-                        chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
-                        for line in chunk.splitlines():
-                            self.output_line.emit(line)
+                        buf += self._channel.recv(4096).decode("utf-8", errors="replace")
+                    # Flush everything left in buf
+                    for leftover in buf.splitlines():
+                        leftover = _ANSI_RE.sub("", leftover).strip()
+                        if leftover:
+                            self.output_line.emit(leftover)
+                    buf = ""
+                    _signalled = True
                     if viewer_url is None:
                         self.viewer_failed.emit(
                             f"ns-viewer exited with code {code} before becoming ready."
@@ -287,7 +307,6 @@ class NerfstudioViewerWorker(QThread):
                     else:
                         self.output_line.emit(f"ns-viewer exited with code {code}.")
                         self.viewer_stopped.emit()
-                    self._cleanup()
                     return
 
                 # Read available stdout
@@ -297,10 +316,11 @@ class NerfstudioViewerWorker(QThread):
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
                         line = line.rstrip("\r")
-                        self.output_line.emit(line)
+                        clean = _ANSI_RE.sub("", line)
+                        self.output_line.emit(clean)
                         # Detect viewer URL
                         if viewer_url is None:
-                            match = _URL_RE.search(line)
+                            match = _URL_RE.search(clean)
                             if match:
                                 viewer_url = f"http://localhost:{local_port}"
                                 self.output_line.emit(
@@ -310,10 +330,11 @@ class NerfstudioViewerWorker(QThread):
 
                 time.sleep(0.05)
         except Exception as exc:
+            _signalled = True
             self.viewer_failed.emit(f"Error monitoring viewer: {exc}")
         finally:
             self._cleanup()
-            if not self._stop_event.is_set():
+            if not self._stop_event.is_set() and not _signalled:
                 self.viewer_stopped.emit()
 
     # ------------------------------------------------------------------

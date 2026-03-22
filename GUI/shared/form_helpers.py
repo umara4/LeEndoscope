@@ -245,6 +245,12 @@ def set_button_enabled_style(button: QPushButton, enabled: bool):
     button.setEnabled(enabled)
     if enabled:
         button.setStyleSheet("")  # Reset to inherit from APP_STYLESHEET
+        # Force Qt to re-evaluate the global stylesheet for this widget
+        style = button.style()
+        if style:
+            style.unpolish(button)
+            style.polish(button)
+        button.update()
     else:
         button.setStyleSheet(f"""
             QPushButton {{

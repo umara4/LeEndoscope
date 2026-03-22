@@ -11,10 +11,8 @@ Key improvements:
 from __future__ import annotations
 import csv
 import os
-import shutil
 import threading
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -22,6 +20,82 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from backend.frame_quality import calculate_snr, calculate_sharpness, eval_frames
 from shared.constants import SNR_THRESHOLD, SHARPNESS_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+def _load_frame_timestamps(session_dir) -> dict:
+    """Load frame timestamps from Raw Data/FrameTimestamp.csv.
+
+    Returns dict mapping frame_index -> timestamp_ms.
+    """
+    frame_ts = {}
+    if not session_dir:
+        return frame_ts
+    try:
+        ts_path = Path(session_dir) / "Raw Data" / "FrameTimestamp.csv"
+        if not ts_path.exists():
+            return frame_ts
+        with open(ts_path, "r", encoding="utf-8") as fp:
+            reader = csv.reader(fp)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 2:
+                    try:
+                        frame_ts[int(row[0])] = float(row[1])
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return frame_ts
+
+
+def _load_imu_data(session_dir) -> list:
+    """Load IMU data from Raw Data/IMUTimeStamp.csv.
+
+    Returns list of (timestamp_ms, [10 sensor values]).
+    """
+    imu_data = []
+    if not session_dir:
+        return imu_data
+    try:
+        imu_path = Path(session_dir) / "Raw Data" / "IMUTimeStamp.csv"
+        if not imu_path.exists():
+            return imu_data
+        with open(imu_path, "r", encoding="utf-8") as fp:
+            reader = csv.reader(fp)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 11:
+                    try:
+                        ts_ms = float(row[0].strip())
+                        vals = [float(row[i].strip()) for i in range(1, 11)]
+                        imu_data.append((ts_ms, vals))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return imu_data
+
+
+def _get_averaged_imu(target_ts_ms, imu_data, k=10):
+    """Find k closest IMU samples by timestamp and return their average."""
+    if not imu_data:
+        return None
+    distances = [(abs(ts - target_ts_ms), idx) for idx, (ts, _) in enumerate(imu_data)]
+    distances.sort()
+    closest_indices = [idx for _, idx in distances[:k]]
+    if not closest_indices:
+        return None
+    num_vals = len(imu_data[0][1])
+    sums = [0.0] * num_vals
+    for idx in closest_indices:
+        _, vals = imu_data[idx]
+        for i in range(num_vals):
+            sums[i] += vals[i]
+    count = len(closest_indices)
+    return [s / count for s in sums]
 
 
 class SegmentExtractor(QThread):
@@ -60,8 +134,8 @@ class SegmentExtractor(QThread):
     def run(self):
         os.makedirs(self.output_folder, exist_ok=True)
 
-        recording_frame_ts = self._load_recording_frame_timestamps()
-        recording_imu_data = self._load_recording_imu_data()
+        recording_frame_ts = _load_frame_timestamps(self.session_dir)
+        recording_imu_data = _load_imu_data(self.session_dir)
 
         # Prepare averaged IMU CSV in the segment folder alongside frames
         imu_output_fp = None
@@ -112,7 +186,7 @@ class SegmentExtractor(QThread):
 
                     if imu_output_writer and recording_imu_data:
                         try:
-                            avg_imu = self._get_averaged_imu(recording_ts_ms, recording_imu_data, k=10)
+                            avg_imu = _get_averaged_imu(recording_ts_ms, recording_imu_data, k=10)
                             if avg_imu:
                                 imu_output_writer.writerow([
                                     frame_name, f"{recording_ts_ms:.3f}",
@@ -142,74 +216,175 @@ class SegmentExtractor(QThread):
             selected, rejected = eval_frames(self.output_folder)
             self.finished_parsing.emit(self.name)
 
-    def _load_recording_frame_timestamps(self) -> dict:
-        """Load frame timestamps from Raw Data/FrameTimestamp.csv."""
-        frame_ts = {}
-        if not self.session_dir:
-            return frame_ts
-        try:
-            raw_data_dir = Path(self.session_dir) / "Raw Data"
-            ts_path = raw_data_dir / "FrameTimestamp.csv"
-            if not ts_path.exists():
-                return frame_ts
-            with open(ts_path, "r", encoding="utf-8") as fp:
-                reader = csv.reader(fp)
-                next(reader, None)  # skip header
-                for row in reader:
-                    if len(row) >= 2:
-                        try:
-                            frame_idx = int(row[0])
-                            ts_ms = float(row[1])
-                            frame_ts[frame_idx] = ts_ms
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return frame_ts
 
-    def _load_recording_imu_data(self) -> list:
-        """Load IMU data from Raw Data/IMUTimeStamp.csv."""
-        imu_data = []
-        if not self.session_dir:
-            return imu_data
-        try:
-            raw_data_dir = Path(self.session_dir) / "Raw Data"
-            imu_path = raw_data_dir / "IMUTimeStamp.csv"
-            if not imu_path.exists():
-                return imu_data
-            with open(imu_path, "r", encoding="utf-8") as fp:
-                reader = csv.reader(fp)
-                next(reader, None)  # skip header
-                for row in reader:
-                    if len(row) >= 11:
-                        try:
-                            ts_ms = float(row[0].strip())
-                            vals = [float(row[i].strip()) for i in range(1, 11)]
-                            imu_data.append((ts_ms, vals))
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return imu_data
+# ---------------------------------------------------------------------------
+# WholeVideoExtractor -- extracts every frame from the entire video
+# ---------------------------------------------------------------------------
+class WholeVideoExtractor(QThread):
+    """Extract ALL frames from a video (every single frame).
 
-    @staticmethod
-    def _get_averaged_imu(target_ts_ms, imu_data, k=10):
-        """Find k closest IMU samples by timestamp and return their average."""
-        if not imu_data:
-            return None
-        distances = [(abs(ts - target_ts_ms), idx) for idx, (ts, _) in enumerate(imu_data)]
-        distances.sort()
-        closest_indices = [idx for _, idx in distances[:k]]
-        if not closest_indices:
-            return None
-        num_vals = len(imu_data[0][1])
-        sums = [0.0] * num_vals
-        for idx in closest_indices:
-            _, vals = imu_data[idx]
-            for i in range(num_vals):
-                sums[i] += vals[i]
-        count = len(closest_indices)
-        return [s / count for s in sums]
+    Saves Frame1.png, Frame2.png, ... into the output folder.
+    Creates frame_index.csv mapping frame number -> frame name -> timestamp_ms.
+    Emits progress(int 0-100) and finished(bool success).
+    """
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(bool)
+
+    def __init__(self, video_path: str, output_folder: str, session_dir=None):
+        super().__init__()
+        self.video_path = video_path
+        self.output_folder = output_folder
+        self.session_dir = session_dir
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            self.finished.emit(False)
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        recording_frame_ts = _load_frame_timestamps(self.session_dir)
+
+        index_csv_path = os.path.join(self.output_folder, "frame_index.csv")
+        csv_fp = open(index_csv_path, "w", encoding="utf-8", newline="")
+        csv_writer = csv.writer(csv_fp)
+        csv_writer.writerow(["frame_number", "frame_name", "timestamp_ms"])
+
+        frame_idx = 0
+        last_emitted_pct = -1
+
+        try:
+            while True:
+                if self._stop_event.is_set():
+                    break
+
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame_name = f"Frame{frame_idx + 1}.png"
+                filepath = os.path.join(self.output_folder, frame_name)
+                cv2.imwrite(filepath, frame)
+
+                pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if (not pos_msec or pos_msec <= 0) and video_fps > 0:
+                    pos_msec = (frame_idx * 1000.0) / video_fps
+                recording_ts_ms = recording_frame_ts.get(frame_idx, pos_msec)
+
+                csv_writer.writerow([frame_idx, frame_name, f"{recording_ts_ms:.3f}"])
+
+                if total_frames > 0:
+                    pct = int((frame_idx / total_frames) * 100)
+                    if pct != last_emitted_pct:
+                        self.progress.emit(pct)
+                        last_emitted_pct = pct
+
+                frame_idx += 1
+        finally:
+            csv_fp.close()
+            cap.release()
+
+        if not self._stop_event.is_set():
+            eval_frames(self.output_folder)
+            self.finished.emit(True)
+        else:
+            self.finished.emit(False)
+
+
+# ---------------------------------------------------------------------------
+# SegmentCSVGenerator -- creates per-segment CSV referencing extracted frames
+# ---------------------------------------------------------------------------
+class SegmentCSVGenerator:
+    """Generate a CSV for a segment mapping to already-extracted whole-video frames.
+
+    Filters frames within the segment's time range and subsamples at the
+    segment's extraction FPS. Includes averaged IMU data per selected frame.
+    """
+
+    def __init__(
+        self,
+        frames_index_csv: str,
+        segment_output_dir: str,
+        start_frame: int,
+        end_frame: int,
+        extraction_fps: int,
+        video_fps: float,
+        segment_name: str,
+        session_dir=None,
+    ):
+        self.frames_index_csv = frames_index_csv
+        self.segment_output_dir = segment_output_dir
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        self.extraction_fps = extraction_fps
+        self.video_fps = video_fps
+        self.segment_name = segment_name
+        self.session_dir = session_dir
+
+    def generate(self) -> int:
+        """Generate segment_frames.csv. Returns number of selected frames."""
+        os.makedirs(self.segment_output_dir, exist_ok=True)
+
+        # Load the whole-video frame index
+        frame_index = []
+        with open(self.frames_index_csv, "r", encoding="utf-8") as fp:
+            reader = csv.reader(fp)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 3:
+                    frame_index.append((int(row[0]), row[1], float(row[2])))
+
+        # Filter to segment range
+        segment_frames = [
+            (fn, name, ts) for fn, name, ts in frame_index
+            if self.start_frame <= fn < self.end_frame
+        ]
+
+        # Subsample at extraction FPS
+        interval = max(1, int(self.video_fps / self.extraction_fps)) \
+            if self.extraction_fps > 0 and self.video_fps > 0 else 1
+
+        selected = []
+        for fn, name, ts in segment_frames:
+            relative_frame = fn - self.start_frame
+            if relative_frame % interval == 0:
+                selected.append((fn, name, ts))
+
+        # Load IMU data
+        imu_data = _load_imu_data(self.session_dir)
+
+        # Write segment CSV
+        frames_dir = str(Path(self.frames_index_csv).parent)
+        csv_path = os.path.join(self.segment_output_dir, "segment_frames.csv")
+        with open(csv_path, "w", encoding="utf-8", newline="") as fp:
+            writer = csv.writer(fp)
+            header = ["frame_number", "frame_name", "timestamp_ms", "frames_dir_path"]
+            if imu_data:
+                header.extend([
+                    "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
+                    "avg_WX", "avg_WY", "avg_WZ",
+                    "avg_AX", "avg_AY", "avg_AZ",
+                ])
+            writer.writerow(header)
+
+            for fn, name, ts in selected:
+                row = [fn, name, f"{ts:.3f}", frames_dir]
+                if imu_data:
+                    avg = _get_averaged_imu(ts, imu_data, k=10)
+                    if avg:
+                        row.extend([f"{v:.6f}" for v in avg])
+                    else:
+                        row.extend([""] * 10)
+                writer.writerow(row)
+
+        return len(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -313,285 +488,3 @@ def extract_frames(
     print(f"Saved {saved_count} frames to {output_folder}")
     if timestamps_path:
         print(f"Wrote timestamps CSV to {timestamps_path}")
-
-
-# ---------------------------------------------------------------------------
-# Full-video extractor (Phase 1 of the two-phase pipeline)
-# ---------------------------------------------------------------------------
-class FullVideoExtractor(QThread):
-    """Extract every frame from a video at native FPS.
-
-    Produces:
-    - All Frames/Frame1.png, Frame2.png, ...
-    - All Frames/VideoFrameTimestamp.csv
-    - All Frames/IMUDataFull.csv (if IMU data is available)
-
-    Emits progress(int) 0-100 and finished_ok() or finished_error(str).
-    Supports cooperative shutdown via request_stop().
-    """
-    progress = pyqtSignal(int)
-    finished_ok = pyqtSignal()
-    finished_error = pyqtSignal(str)
-
-    def __init__(self, video_path: str, session_dir, parent=None):
-        super().__init__(parent)
-        self.video_path = video_path
-        self.session_dir = session_dir
-        self._stop_event = threading.Event()
-
-    def request_stop(self):
-        self._stop_event.set()
-
-    def run(self):
-        try:
-            self._extract()
-        except Exception as e:
-            self.finished_error.emit(str(e))
-
-    def _extract(self):
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            self.finished_error.emit("Cannot open video file")
-            return
-
-        video_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
-        if video_fps < 1:
-            video_fps = 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            total_frames = 1
-
-        # Create output directory
-        all_frames_dir = Path(self.session_dir) / "All Frames"
-        all_frames_dir.mkdir(parents=True, exist_ok=True)
-
-        # Load recording frame timestamps (if available)
-        recording_frame_ts = self._load_recording_frame_timestamps()
-
-        # Load IMU data (if available)
-        imu_data = self._load_recording_imu_data()
-        k = max(1, round(100 / video_fps))  # IMU averaging window
-
-        # Open CSVs
-        ts_csv_path = all_frames_dir / "VideoFrameTimestamp.csv"
-        ts_fp = open(ts_csv_path, "w", encoding="utf-8", newline="")
-        ts_writer = csv.writer(ts_fp)
-        ts_writer.writerow(["frame_name", "frame_index", "timestamp_ms"])
-
-        imu_fp = None
-        imu_writer = None
-        if imu_data:
-            imu_csv_path = all_frames_dir / "IMUDataFull.csv"
-            imu_fp = open(imu_csv_path, "w", encoding="utf-8", newline="")
-            imu_writer = csv.writer(imu_fp)
-            imu_writer.writerow([
-                "frame_name", "timestamp_ms",
-                "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
-                "avg_WX", "avg_WY", "avg_WZ",
-                "avg_AX", "avg_AY", "avg_AZ",
-            ])
-
-        frame_idx = 0
-        last_emitted_pct = -1
-
-        try:
-            while True:
-                if self._stop_event.is_set():
-                    break
-
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                frame_name = f"Frame{frame_idx + 1}.png"
-                out_path = all_frames_dir / frame_name
-                cv2.imwrite(str(out_path), frame)
-
-                # Compute timestamp
-                pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-                if (not pos_msec or pos_msec <= 0) and video_fps > 0:
-                    pos_msec = (frame_idx * 1000.0) / video_fps
-
-                recording_ts_ms = recording_frame_ts.get(frame_idx, pos_msec)
-
-                ts_writer.writerow([frame_name, frame_idx, f"{recording_ts_ms:.3f}"])
-
-                # IMU averaging
-                if imu_writer and imu_data:
-                    try:
-                        avg_imu = SegmentExtractor._get_averaged_imu(recording_ts_ms, imu_data, k=k)
-                        if avg_imu:
-                            imu_writer.writerow([
-                                frame_name, f"{recording_ts_ms:.3f}",
-                            ] + [f"{v:.6f}" for v in avg_imu])
-                    except Exception:
-                        pass
-
-                frame_idx += 1
-
-                # Progress
-                pct = int((frame_idx / total_frames) * 100)
-                if pct != last_emitted_pct:
-                    self.progress.emit(pct)
-                    last_emitted_pct = pct
-        finally:
-            try:
-                ts_fp.close()
-            except Exception:
-                pass
-            try:
-                if imu_fp is not None:
-                    imu_fp.close()
-            except Exception:
-                pass
-            cap.release()
-
-        if not self._stop_event.is_set():
-            self.finished_ok.emit()
-
-    def _load_recording_frame_timestamps(self) -> dict:
-        """Load frame timestamps from Raw Data/FrameTimestamp.csv."""
-        frame_ts = {}
-        if not self.session_dir:
-            return frame_ts
-        try:
-            ts_path = Path(self.session_dir) / "Raw Data" / "FrameTimestamp.csv"
-            if not ts_path.exists():
-                return frame_ts
-            with open(ts_path, "r", encoding="utf-8") as fp:
-                reader = csv.reader(fp)
-                next(reader, None)
-                for row in reader:
-                    if len(row) >= 2:
-                        try:
-                            frame_ts[int(row[0])] = float(row[1])
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return frame_ts
-
-    def _load_recording_imu_data(self) -> list:
-        """Load IMU data from Raw Data/IMUTimeStamp.csv."""
-        imu_data = []
-        if not self.session_dir:
-            return imu_data
-        try:
-            imu_path = Path(self.session_dir) / "Raw Data" / "IMUTimeStamp.csv"
-            if not imu_path.exists():
-                return imu_data
-            with open(imu_path, "r", encoding="utf-8") as fp:
-                reader = csv.reader(fp)
-                next(reader, None)
-                for row in reader:
-                    if len(row) >= 11:
-                        try:
-                            ts_ms = float(row[0].strip())
-                            vals = [float(row[i].strip()) for i in range(1, 11)]
-                            imu_data.append((ts_ms, vals))
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        return imu_data
-
-
-# ---------------------------------------------------------------------------
-# Segment frame selection (Phase 2 — fast file copy + CSV filter)
-# ---------------------------------------------------------------------------
-def select_segment_frames(
-    all_frames_dir: Path,
-    timestamps_csv: Path,
-    imu_csv: Optional[Path],
-    output_dir: Path,
-    start_sec: float,
-    end_sec: float,
-    target_fps: int,
-    video_fps: float,
-):
-    """Select frames from All Frames for a segment at the target FPS.
-
-    Reads VideoFrameTimestamp.csv, filters by time range, subsamples at
-    target_fps, copies frames to output_dir, and writes averaged_imu.csv.
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Read VideoFrameTimestamp.csv
-    frames = []
-    with open(timestamps_csv, "r", encoding="utf-8") as fp:
-        reader = csv.reader(fp)
-        next(reader, None)  # skip header
-        for row in reader:
-            if len(row) >= 3:
-                try:
-                    fname = row[0]
-                    fidx = int(row[1])
-                    ts_ms = float(row[2])
-                    frames.append((fname, fidx, ts_ms))
-                except Exception:
-                    pass
-
-    # 2. Filter by time range (convert start/end from seconds to ms)
-    start_ms = start_sec * 1000.0
-    end_ms = end_sec * 1000.0
-    in_range = [(fn, fi, ts) for fn, fi, ts in frames if start_ms <= ts <= end_ms]
-
-    if not in_range:
-        return
-
-    # 3. Subsample at target_fps
-    step = max(1, round(video_fps / target_fps)) if target_fps > 0 and video_fps > 0 else 1
-    selected = in_range[::step]
-
-    # 4. Load IMU data (if available) for filtering
-    imu_rows = {}
-    if imu_csv and imu_csv.exists():
-        try:
-            with open(imu_csv, "r", encoding="utf-8") as fp:
-                reader = csv.reader(fp)
-                imu_header = next(reader, None)
-                for row in reader:
-                    if len(row) >= 2:
-                        imu_rows[row[0]] = row
-        except Exception:
-            pass
-
-    # 5. Copy selected frames and build averaged_imu.csv
-    imu_out_fp = None
-    imu_out_writer = None
-    if imu_rows:
-        try:
-            imu_out_path = output_dir / "averaged_imu.csv"
-            imu_out_fp = open(imu_out_path, "w", encoding="utf-8", newline="")
-            imu_out_writer = csv.writer(imu_out_fp)
-            imu_out_writer.writerow([
-                "frame_name", "frame_timestamp_ms",
-                "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
-                "avg_WX", "avg_WY", "avg_WZ",
-                "avg_AX", "avg_AY", "avg_AZ",
-            ])
-        except Exception:
-            imu_out_fp = None
-            imu_out_writer = None
-
-    try:
-        for i, (src_name, fidx, ts_ms) in enumerate(selected):
-            dest_name = f"Frame{i + 1}.png"
-            src_path = all_frames_dir / src_name
-            dest_path = output_dir / dest_name
-            if src_path.exists():
-                shutil.copy2(str(src_path), str(dest_path))
-
-            # Write IMU row (re-mapped to new frame name)
-            if imu_out_writer and src_name in imu_rows:
-                orig_row = imu_rows[src_name]
-                imu_out_writer.writerow([dest_name] + orig_row[1:])
-    finally:
-        if imu_out_fp is not None:
-            try:
-                imu_out_fp.close()
-            except Exception:
-                pass
-
-    # 6. Run frame quality evaluation
-    eval_frames(str(output_dir))

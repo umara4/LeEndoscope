@@ -5,6 +5,7 @@ Moved from GUI/frame_browser.py. Uses shared theme and constants.
 """
 from __future__ import annotations
 
+import csv as csv_mod
 import os
 import json
 from PyQt6.QtWidgets import (
@@ -18,13 +19,13 @@ from shared.constants import FRAME_SELECTION_PATH
 
 
 class FrameBrowser(QDialog):
-    def __init__(self, segments, video_id=None, parent=None, initial_selection=None,
-                 all_frames_dir=None):
+    def __init__(self, segments, video_id=None, parent=None, initial_selection=None):
         """
-        segments: list of tuples -> [(segment_name, folder_path), ...]
+        segments: list of tuples:
+            - (segment_name, folder_path) -- show all images in folder
+            - (segment_name, folder_path, csv_filter_path) -- show only images listed in CSV
         video_id: unique identifier for the loaded video (e.g., absolute path)
         initial_selection: optional seed data to merge for this video
-        all_frames_dir: path to All Frames directory (for total frame count)
         """
         super().__init__(parent)
         self.setWindowTitle("Extracted Frames")
@@ -32,17 +33,11 @@ class FrameBrowser(QDialog):
         self.video_id = video_id or "__default__"
         self.initial_selection = initial_selection or {}
 
-        # Count total frames from All Frames directory
-        self.total_video_frames = 0
-        if all_frames_dir and os.path.isdir(all_frames_dir):
-            self.total_video_frames = len([
-                f for f in os.listdir(all_frames_dir)
-                if f.lower().endswith((".jpg", ".png"))
-            ])
-
         self.selection_file = str(FRAME_SELECTION_PATH)
         self.store, self.selected_frames = self._load_selection()
-        self.segment_folders = {folder for _, folder in segments}
+        self.segment_folders = set()
+        for seg_tuple in segments:
+            self.segment_folders.add(seg_tuple[1])
         self._merge_initial_selection()
 
         main_layout = QVBoxLayout(self)
@@ -57,22 +52,41 @@ class FrameBrowser(QDialog):
         total_checked, total_images = 0, 0
 
         # Build tabs per segment
-        for seg_name, folder in segments:
+        for seg_tuple in segments:
+            if len(seg_tuple) == 3:
+                seg_name, folder, csv_filter = seg_tuple
+            else:
+                seg_name, folder = seg_tuple[0], seg_tuple[1]
+                csv_filter = None
+
             if not os.path.exists(folder):
                 continue
 
             if folder not in self.selected_frames:
                 self.selected_frames[folder] = {}
 
+            # Determine which images to show
+            if csv_filter and os.path.exists(csv_filter):
+                images = []
+                with open(csv_filter, "r", encoding="utf-8") as cf:
+                    reader = csv_mod.reader(cf)
+                    next(reader, None)
+                    for row in reader:
+                        if len(row) >= 2:
+                            images.append(row[1])
+            else:
+                images = sorted([f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".png"))])
+
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             container = QWidget()
             grid = QGridLayout(container)
 
-            images = sorted([f for f in os.listdir(folder) if f.lower().endswith((".jpg", ".png"))])
             seg_frame_count = len(images)
             for i, img_name in enumerate(images):
                 path = os.path.join(folder, img_name)
+                if not os.path.exists(path):
+                    continue
 
                 # Ensure image entry exists with defaults
                 if img_name not in self.selected_frames[folder]:
@@ -161,11 +175,7 @@ class FrameBrowser(QDialog):
                 pass
 
     def _update_summary(self, checked, total):
-        parts = []
-        if self.total_video_frames > 0:
-            parts.append(f"Total video frames: {self.total_video_frames}")
-        parts.append(f"Selected: {checked} / {total}")
-        self.summary_label.setText("  |  ".join(parts))
+        self.summary_label.setText(f"Selected: {checked} / {total}")
 
     def closeEvent(self, event):
         # Persist selections automatically when closing the dialog
