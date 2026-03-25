@@ -32,13 +32,15 @@ CSV_FLUSH_INTERVAL_MS = 1000 # flush CSV buffers once per second
 # ---------------------------------------------------------------------------
 # Serial / IMU
 # ---------------------------------------------------------------------------
-SERIAL_BAUD_RATE = 115200
+SERIAL_BAUD_RATE = 921600
 SERIAL_TIMEOUT = 0.5
 IMU_SYNC_TIMEOUT_S = 0.6
 IMU_SYNC_POLL_MS = 50
-BNO_RESET_CHECK_MS = 100
-BNO_RESET_TIMEOUT_S = 8.0
+IMU_RESET_CHECK_MS = 100
+IMU_RESET_TIMEOUT_S = 8.0
 IMU_SAMPLES_PER_FRAME = 10  # number of nearest IMU samples to average
+IMU_EXPECTED_FIELDS = 7     # timestamp + 6 sensor values (AX, AY, AZ, WX, WY, WZ)
+IMU_SENSOR_FIELDS = 6       # number of sensor value columns (no quaternion)
 
 # ---------------------------------------------------------------------------
 # Frame Quality Thresholds

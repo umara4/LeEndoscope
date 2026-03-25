@@ -43,7 +43,7 @@ except ImportError:
 from shared.constants import (
     DATA_DIR, PROJECT_ROOT, SERIAL_BAUD_RATE,
     RECORD_TICK_MS, LIVE_PREVIEW_MS, DEFAULT_RECORDING_FPS,
-    BNO_RESET_CHECK_MS, BNO_RESET_TIMEOUT_S, IMU_SYNC_POLL_MS,
+    IMU_RESET_CHECK_MS, IMU_RESET_TIMEOUT_S, IMU_SYNC_POLL_MS,
 )
 from shared.form_helpers import set_button_enabled_style
 from shared.geometry_mixin import DebouncedGeometryMixin
@@ -378,7 +378,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         return session_dir
 
     def _validate_imu_csv(self, csv_path: Path) -> bool:
-        """Validate that the selected CSV has the expected IMU format (11+ columns)."""
+        """Validate that the selected CSV has the expected IMU format (7+ columns)."""
         try:
             with open(csv_path, "r", encoding="utf-8") as fp:
                 reader = csv.reader(fp)
@@ -389,11 +389,11 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
 
                 valid_rows = 0
                 for row in reader:
-                    if len(row) < 11:
+                    if len(row) < 7:
                         continue
                     try:
                         float(row[0].strip())
-                        [float(row[j].strip()) for j in range(1, 11)]
+                        [float(row[j].strip()) for j in range(1, len(row))]
                         valid_rows += 1
                     except ValueError:
                         continue
@@ -404,8 +404,8 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
                     QMessageBox.warning(
                         self, "Invalid IMU CSV",
                         "The selected CSV does not contain valid IMU data.\n\n"
-                        "Expected format: 11 columns per row\n"
-                        "  timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z, A.X, A.Y, A.Z"
+                        "Expected format: 7 columns per row\n"
+                        "  timestamp_ms, A.X, A.Y, A.Z, W.X, W.Y, W.Z"
                     )
                     return False
         except Exception as e:
@@ -620,7 +620,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
                 self._side.flash_comport_combo.addItem(f"{port} - {desc}" if desc else port, port)
 
     def flash_hardware(self):
-        """Flash Arduino and reset BNO055 -- standalone, does not start camera."""
+        """Flash Arduino and reset IMU -- standalone, does not start camera."""
         com_port = self._side.flash_comport_combo.currentData()
         if com_port is None:
             QMessageBox.warning(self, "No COM Port", "Please select a COM port for flashing.")
@@ -645,7 +645,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             self._serial_panel.setVisible(True)
             self._side.serial_monitor_button.setText("Serial Monitor \u25bc")
 
-        # Store flash COM port for BNO reset later
+        # Store flash COM port for IMU reset later
         self._flash_com_port_for_reset = str(com_port)
         self._flash_pending_start_camera = False
 
@@ -832,23 +832,23 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
     def _show_flash_result(self, success: bool, msg: str):
         if success:
             self.log_message("Arduino flash finished successfully!")
-            self._serial_panel.append_text("[FLASH] Resetting BNO055 sensor...")
-            self.log_message("Resetting BNO055 sensor...")
-            self._reset_bno055_after_flash()
+            self._serial_panel.append_text("[FLASH] Resetting IMU sensor...")
+            self.log_message("Resetting IMU sensor...")
+            self._reset_imu_after_flash()
         else:
             self.log_message(f"Arduino flash failed: {msg}")
             self._side.flash_start_button.setEnabled(True)
             QMessageBox.critical(self, "Flash Failed", msg)
 
     # ------------------------------------------------------------------
-    # BNO055 reset after flash
+    # IMU reset after flash
     # ------------------------------------------------------------------
-    def _reset_bno055_after_flash(self):
-        # Give ESP32 time to boot -- use QTimer instead of blocking sleep
-        QTimer.singleShot(2000, self._reset_bno055_start)
+    def _reset_imu_after_flash(self):
+        # Give ESP32 time to reboot after flash
+        QTimer.singleShot(2000, self._reset_imu_start)
 
-    def _reset_bno055_start(self):
-        # Use the flash COM port for the serial reader during BNO reset
+    def _reset_imu_start(self):
+        # Use the flash COM port for the serial reader during IMU reset
         flash_port = getattr(self, '_flash_com_port_for_reset', None) or self.selected_com_port
         if flash_port:
             self.selected_com_port = flash_port
@@ -856,73 +856,98 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             self._ensure_serial_reader_running()
         except Exception as e:
             self._serial_panel.append_text(f"[ERROR] Cannot open serial after flash: {e}")
-            self._finish_bno_reset(success=False)
+            self._finish_imu_reset(success=False)
             return
         if self._serial_reader is None:
-            self._serial_panel.append_text("[ERROR] Serial reader not available for BNO055 reset")
-            self._finish_bno_reset(success=False)
+            self._serial_panel.append_text("[ERROR] Serial reader not available for IMU reset")
+            self._finish_imu_reset(success=False)
             return
         self._serial_monitor_timer.start(50)
-        self._bno_reset_attempts = 0
-        self._bno_reset_max_attempts = 3
-        self._send_bno_reset_command()
+        self._imu_reset_attempts = 0
+        self._imu_reset_max_attempts = 3
+        # Wait for ESP32 to start sending data before issuing RESET_IMU
+        self._serial_panel.append_text("[IMU] Waiting for ESP32 serial data...")
+        self._imu_wait_start = time.time()
+        self._imu_wait_timer = QTimer(self)
+        self._imu_wait_timer.timeout.connect(self._wait_for_serial_data)
+        self._imu_wait_timer.start(IMU_RESET_CHECK_MS)
 
-    def _send_bno_reset_command(self):
+    def _wait_for_serial_data(self):
+        """Poll until we receive any line from the ESP32, confirming it is alive."""
+        elapsed = time.time() - self._imu_wait_start
+        if self._serial_reader is not None:
+            lines = self._serial_reader.pop_lines()
+            if lines:
+                self._imu_wait_timer.stop()
+                for line in lines:
+                    self._serial_panel.append_text(line)
+                self._serial_panel.append_text("[IMU] ESP32 is responding, sending RESET_IMU...")
+                self._send_imu_reset_command()
+                return
+        if elapsed > IMU_RESET_TIMEOUT_S:
+            self._imu_wait_timer.stop()
+            self._serial_panel.append_text("[IMU] No data from ESP32 -- check wiring and COM port")
+            self._finish_imu_reset(success=False)
+
+    def _send_imu_reset_command(self):
         if self._serial_reader is not None:
             self._serial_reader.flush_input()
-            self._serial_reader.send_line("RESET_BNO")
-            self._serial_panel.append_text("[BNO055] Sent RESET_BNO command")
-        self._bno_reset_start_time = time.time()
-        self._bno_reset_timer = QTimer(self)
-        self._bno_reset_timer.timeout.connect(self._check_bno_reset_response)
-        self._bno_reset_timer.start(BNO_RESET_CHECK_MS)
+            self._serial_reader.send_line("RESET_IMU")
+            self._serial_panel.append_text("[IMU] Sent RESET_IMU command")
+        else:
+            self._finish_imu_reset(success=False)
+            return
+        self._imu_reset_start_time = time.time()
+        self._imu_reset_timer = QTimer(self)
+        self._imu_reset_timer.timeout.connect(self._check_imu_reset_response)
+        self._imu_reset_timer.start(IMU_RESET_CHECK_MS)
 
-    def _check_bno_reset_response(self):
-        elapsed = time.time() - self._bno_reset_start_time
+    def _check_imu_reset_response(self):
+        elapsed = time.time() - self._imu_reset_start_time
         if self._serial_reader is not None:
             lines = self._serial_reader.pop_lines()
             for line in lines:
                 self._serial_panel.append_text(line)
-                if "BNO055_READY" in line:
-                    self._bno_reset_timer.stop()
-                    self._serial_panel.append_text("[BNO055] Sensor reset successful")
-                    self.log_message("BNO055 sensor reset successful")
-                    self._finish_bno_reset(success=True)
+                if "IMU_READY" in line:
+                    self._imu_reset_timer.stop()
+                    self._serial_panel.append_text("[IMU] Sensor reset successful")
+                    self.log_message("IMU sensor reset successful")
+                    self._finish_imu_reset(success=True)
                     return
-                if "BNO055_ERROR" in line:
-                    self._bno_reset_timer.stop()
-                    self._bno_reset_attempts += 1
-                    if self._bno_reset_attempts < self._bno_reset_max_attempts:
+                if "IMU_ERROR" in line:
+                    self._imu_reset_timer.stop()
+                    self._imu_reset_attempts += 1
+                    if self._imu_reset_attempts < self._imu_reset_max_attempts:
                         self._serial_panel.append_text(
-                            f"[BNO055] Reset failed, retrying ({self._bno_reset_attempts}/{self._bno_reset_max_attempts})..."
+                            f"[IMU] Reset failed, retrying ({self._imu_reset_attempts}/{self._imu_reset_max_attempts})..."
                         )
-                        self._send_bno_reset_command()
+                        self._send_imu_reset_command()
                     else:
-                        self._serial_panel.append_text("[BNO055] Reset failed after all retries")
-                        self._finish_bno_reset(success=False)
+                        self._serial_panel.append_text("[IMU] Reset failed after all retries")
+                        self._finish_imu_reset(success=False)
                     return
-        if elapsed > BNO_RESET_TIMEOUT_S:
-            self._bno_reset_timer.stop()
-            self._bno_reset_attempts += 1
-            if self._bno_reset_attempts < self._bno_reset_max_attempts:
+        if elapsed > IMU_RESET_TIMEOUT_S:
+            self._imu_reset_timer.stop()
+            self._imu_reset_attempts += 1
+            if self._imu_reset_attempts < self._imu_reset_max_attempts:
                 self._serial_panel.append_text(
-                    f"[BNO055] Reset timed out, retrying ({self._bno_reset_attempts}/{self._bno_reset_max_attempts})..."
+                    f"[IMU] Reset timed out, retrying ({self._imu_reset_attempts}/{self._imu_reset_max_attempts})..."
                 )
-                self._send_bno_reset_command()
+                self._send_imu_reset_command()
             else:
-                self._serial_panel.append_text("[BNO055] Reset timed out after all retries -- proceeding anyway")
-                self._finish_bno_reset(success=True)
+                self._serial_panel.append_text("[IMU] Reset timed out after all retries -- proceeding anyway")
+                self._finish_imu_reset(success=True)
 
-    def _finish_bno_reset(self, success: bool):
+    def _finish_imu_reset(self, success: bool):
         try:
-            if hasattr(self, '_bno_reset_timer') and self._bno_reset_timer.isActive():
-                self._bno_reset_timer.stop()
+            if hasattr(self, '_imu_reset_timer') and self._imu_reset_timer.isActive():
+                self._imu_reset_timer.stop()
         except Exception:
             pass
         if success:
-            self.log_message("BNO055 reset successful -- hardware is ready")
+            self.log_message("IMU reset successful -- hardware is ready")
         else:
-            self.log_message("BNO055 reset failed")
+            self.log_message("IMU reset failed")
         self._flash_pending_start_camera = False
         self._side.flash_start_button.setEnabled(True)
 
@@ -1019,7 +1044,7 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         if self._serial_reader is None:
             return
         csv_path = out_video_path.parent / "IMUTimeStamp.csv"
-        header = "timestamp_ms, Q.W, Q.X, Q.Y, Q.Z, W.X, W.Y, W.Z, A.X, A.Y, A.Z"
+        header = "timestamp_ms, A.X, A.Y, A.Z, W.X, W.Y, W.Z"
         try:
             self._sync_imu_timebase()
         except Exception:

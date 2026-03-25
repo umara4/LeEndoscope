@@ -54,7 +54,7 @@ def _load_frame_timestamps(session_dir) -> dict:
 def _load_imu_data(session_dir) -> list:
     """Load IMU data from Raw Data/IMUTimeStamp.csv.
 
-    Returns list of (timestamp_ms, [10 sensor values]).
+    Returns list of (timestamp_ms, [sensor values]).
     """
     imu_data = []
     if not session_dir:
@@ -67,10 +67,10 @@ def _load_imu_data(session_dir) -> list:
             reader = csv.reader(fp)
             next(reader, None)
             for row in reader:
-                if len(row) >= 11:
+                if len(row) >= 7:
                     try:
                         ts_ms = float(row[0].strip())
-                        vals = [float(row[i].strip()) for i in range(1, 11)]
+                        vals = [float(row[i].strip()) for i in range(1, len(row))]
                         imu_data.append((ts_ms, vals))
                     except Exception:
                         pass
@@ -147,9 +147,8 @@ class SegmentExtractor(QThread):
                 imu_output_writer = csv.writer(imu_output_fp)
                 imu_output_writer.writerow([
                     "frame_name", "frame_timestamp_ms",
-                    "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
-                    "avg_WX", "avg_WY", "avg_WZ",
-                    "avg_AX", "avg_AY", "avg_AZ"
+                    "avg_AX", "avg_AY", "avg_AZ",
+                    "avg_WX", "avg_WY", "avg_WZ"
                 ])
             except Exception:
                 imu_output_fp = None
@@ -368,9 +367,8 @@ class SegmentCSVGenerator:
             header = ["frame_number", "frame_name", "timestamp_ms", "frames_dir_path"]
             if imu_data:
                 header.extend([
-                    "avg_QW", "avg_QX", "avg_QY", "avg_QZ",
-                    "avg_WX", "avg_WY", "avg_WZ",
                     "avg_AX", "avg_AY", "avg_AZ",
+                    "avg_WX", "avg_WY", "avg_WZ",
                 ])
             writer.writerow(header)
 
@@ -381,7 +379,7 @@ class SegmentCSVGenerator:
                     if avg:
                         row.extend([f"{v:.6f}" for v in avg])
                     else:
-                        row.extend([""] * 10)
+                        row.extend([""] * len(imu_data[0][1]))
                 writer.writerow(row)
 
         return len(selected)

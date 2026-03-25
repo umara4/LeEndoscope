@@ -51,7 +51,7 @@ class SidePanel(QFrame):
 
         flash_btn_row = QHBoxLayout()
         self.flash_refresh_button = QPushButton("Refresh")
-        self.flash_start_button = QPushButton("Flash && Reset BNO055")
+        self.flash_start_button = QPushButton("Flash && Reset IMU")
         flash_btn_row.addWidget(self.flash_refresh_button)
         flash_btn_row.addWidget(self.flash_start_button)
         flash_layout.addLayout(flash_btn_row)
