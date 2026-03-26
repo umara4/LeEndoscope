@@ -57,23 +57,36 @@ class SerialPortReader:
         self._buffer: deque = deque(maxlen=5000)
         self._buf_lock = threading.Lock()
 
+        # Dedicated buffer for SYNC responses so they aren't stolen by
+        # pop_lines() (serial monitor) or lost during flush_input().
+        self._sync_buffer: deque = deque(maxlen=20)
+        self._sync_lock = threading.Lock()
+
         self._log_fp = None
         self._log_lock = threading.Lock()
 
         # Time sync (Arduino micros -> host perf_counter micros -> recording-relative ms)
+        self._ts_lock = threading.Lock()
         self._sync_offset_us: Optional[float] = None
         self._record_start_host_us: Optional[float] = None
-        self._imu_first_logged_ms: Optional[float] = None
         self._last_logged_ms: Optional[float] = None
         self._logged_rows: int = 0
 
     def set_time_sync(self, sync_offset_us: Optional[float],
                       record_start_host_us: Optional[float]) -> None:
-        self._sync_offset_us = sync_offset_us
-        self._record_start_host_us = record_start_host_us
-        self._imu_first_logged_ms = None
-        self._last_logged_ms = None
-        self._logged_rows = 0
+        with self._ts_lock:
+            self._sync_offset_us = sync_offset_us
+            self._record_start_host_us = record_start_host_us
+            self._last_logged_ms = None
+            self._logged_rows = 0
+
+    def get_sync_offset(self) -> Optional[float]:
+        with self._ts_lock:
+            return self._sync_offset_us
+
+    def update_sync_offset(self, sync_offset_us: Optional[float]) -> None:
+        with self._ts_lock:
+            self._sync_offset_us = sync_offset_us
 
     def flush_input(self) -> None:
         """Clear both pyserial RX buffer and in-memory buffer."""
@@ -137,9 +150,9 @@ class SerialPortReader:
             self._log_fp = open(csv_path, "w", encoding="utf-8", newline="\n")
             self._log_fp.write(header.rstrip("\n") + "\n")
             self._log_fp.flush()
-        self._imu_first_logged_ms = None
-        self._last_logged_ms = None
-        self._logged_rows = 0
+        with self._ts_lock:
+            self._last_logged_ms = None
+            self._logged_rows = 0
 
     def disable_logging(self) -> None:
         with self._log_lock:
@@ -158,10 +171,30 @@ class SerialPortReader:
             self._buffer.clear()
             return lines
 
-    def get_logging_stats(self) -> tuple[int, Optional[float]]:
-        return int(self._logged_rows), self._last_logged_ms
+    def pop_sync_lines(self) -> List[str]:
+        """Drain only the dedicated SYNC response buffer.
 
-    def _maybe_log_line(self, line: str) -> None:
+        This prevents the serial monitor (pop_lines) from stealing SYNC
+        responses needed by the sync handshake code.
+        """
+        with self._sync_lock:
+            if not self._sync_buffer:
+                return []
+            lines = list(self._sync_buffer)
+            self._sync_buffer.clear()
+            return lines
+
+    def get_logging_stats(self) -> tuple[int, Optional[float]]:
+        with self._ts_lock:
+            return int(self._logged_rows), self._last_logged_ms
+
+    def _maybe_log_line(self, line: str, host_perf_s: float) -> None:
+        """Log an IMU data line using the host clock for the timestamp.
+
+        Args:
+            line: Raw serial line from Arduino (format: arduino_us,ax,ay,az,wx,wy,wz)
+            host_perf_s: time.perf_counter() captured when line was received
+        """
         if not line:
             return
         low = line.strip().lower()
@@ -174,23 +207,22 @@ class SerialPortReader:
             return
 
         try:
-            arduino_us = float(parts[0])
-            if self._sync_offset_us is not None and self._record_start_host_us is not None:
-                host_us = arduino_us + float(self._sync_offset_us)
-                rel_ms = (host_us - float(self._record_start_host_us)) / 1000.0
-            else:
-                rel_ms = arduino_us / 1000.0
+            # Use host clock (same clock as frame timestamps) to avoid
+            # drift between Arduino crystal and PC clock.
+            with self._ts_lock:
+                if self._record_start_host_us is not None:
+                    host_us = host_perf_s * 1_000_000.0
+                    rel_ms = (host_us - float(self._record_start_host_us)) / 1000.0
+                else:
+                    # Fallback: use Arduino timestamp as raw microseconds
+                    rel_ms = float(parts[0]) / 1000.0
 
-            if self._imu_first_logged_ms is None:
-                self._imu_first_logged_ms = rel_ms
+                if rel_ms < 0:
+                    rel_ms = 0.0
 
-            rel_ms = rel_ms - float(self._imu_first_logged_ms)
-            if rel_ms < 0:
-                rel_ms = 0.0
-
-            parts[0] = str(int(round(rel_ms)))
-            self._last_logged_ms = float(rel_ms)
-            self._logged_rows += 1
+                parts[0] = f"{rel_ms:.3f}"
+                self._last_logged_ms = float(rel_ms)
+                self._logged_rows += 1
         except Exception:
             pass
 
@@ -214,15 +246,25 @@ class SerialPortReader:
             if not raw:
                 continue
 
+            # Capture host clock immediately after receiving data —
+            # same clock source as frame timestamps (time.perf_counter)
+            host_perf_s = time.perf_counter()
+
             try:
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             except Exception:
                 line = str(raw).rstrip("\r\n")
 
+            # Route SYNC responses to dedicated buffer (not consumed by pop_lines/serial monitor)
+            stripped = line.strip()
+            if stripped.startswith("SYNC,"):
+                with self._sync_lock:
+                    self._sync_buffer.append(line)
+
             with self._buf_lock:
                 self._buffer.append(line)
 
-            self._maybe_log_line(line)
+            self._maybe_log_line(line, host_perf_s)
 
 
 # ---------------------------------------------------------------------------

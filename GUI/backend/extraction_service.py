@@ -9,6 +9,7 @@ Key improvements:
 - Progress signal throttled to integer-% changes only
 """
 from __future__ import annotations
+import bisect
 import csv
 import os
 import threading
@@ -79,21 +80,36 @@ def _load_imu_data(session_dir) -> list:
     return imu_data
 
 
-def _get_averaged_imu(target_ts_ms, imu_data, k=10):
-    """Find k closest IMU samples by timestamp and return their average."""
+def _get_averaged_imu(target_ts_ms, imu_data, k=10, _ts_cache={}):
+    """Find k closest IMU samples by timestamp and return their average.
+
+    Uses binary search (O(k log k) per call) instead of sorting all samples.
+    The imu_data list must be sorted by timestamp (it is, since samples arrive
+    in temporal order from the serial reader).
+    """
     if not imu_data:
         return None
-    distances = [(abs(ts - target_ts_ms), idx) for idx, (ts, _) in enumerate(imu_data)]
-    distances.sort()
-    closest_indices = [idx for _, idx in distances[:k]]
+    # Build/cache a timestamp-only list for bisect lookups
+    cache_key = id(imu_data)
+    if cache_key not in _ts_cache or len(_ts_cache[cache_key]) != len(imu_data):
+        _ts_cache[cache_key] = [ts for ts, _ in imu_data]
+    timestamps = _ts_cache[cache_key]
+
+    idx = bisect.bisect_left(timestamps, target_ts_ms)
+    # Gather 2*k candidates around the insertion point, then pick k closest
+    left = max(0, idx - k)
+    right = min(len(imu_data), idx + k)
+    candidates = [(abs(timestamps[i] - target_ts_ms), i) for i in range(left, right)]
+    candidates.sort()
+    closest_indices = [i for _, i in candidates[:k]]
     if not closest_indices:
         return None
     num_vals = len(imu_data[0][1])
     sums = [0.0] * num_vals
-    for idx in closest_indices:
-        _, vals = imu_data[idx]
-        for i in range(num_vals):
-            sums[i] += vals[i]
+    for i in closest_indices:
+        _, vals = imu_data[i]
+        for j in range(num_vals):
+            sums[j] += vals[j]
     count = len(closest_indices)
     return [s / count for s in sums]
 

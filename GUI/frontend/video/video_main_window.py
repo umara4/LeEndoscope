@@ -22,6 +22,7 @@ import json
 import time
 import shutil
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -43,7 +44,7 @@ except ImportError:
 from shared.constants import (
     DATA_DIR, PROJECT_ROOT, SERIAL_BAUD_RATE,
     RECORD_TICK_MS, LIVE_PREVIEW_MS, DEFAULT_RECORDING_FPS,
-    IMU_RESET_CHECK_MS, IMU_RESET_TIMEOUT_S, IMU_SYNC_POLL_MS,
+    IMU_RESET_CHECK_MS, IMU_RESET_TIMEOUT_S, IMU_SYNC_POLL_MS, IMU_SYNC_TIMEOUT_S,
 )
 from shared.form_helpers import set_button_enabled_style
 from shared.geometry_mixin import DebouncedGeometryMixin
@@ -769,6 +770,9 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         # Start serial reader (background, for recording use)
         self._ensure_serial_reader_running()
 
+        # Pre-sync IMU timebase so offset is ready before recording starts
+        self._pre_sync_imu()
+
         # Enable recording
         self._side.set_recording_enabled(True)
 
@@ -1039,44 +1043,104 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         if lines:
             self._serial_panel.append_lines(lines)
 
-    def _start_serial_csv_logging(self, out_video_path: Path):
+    def _prepare_imu_sync(self) -> Optional[float]:
+        """Perform SYNC handshake and return the offset. Call BEFORE setting T0."""
         self._ensure_serial_reader_running()
+        if self._serial_reader is None:
+            return None
+        offset = self._serial_reader.get_sync_offset()
+        if offset is None:
+            offset = self._sync_imu_blocking(timeout_s=IMU_SYNC_TIMEOUT_S)
+        return offset
+
+    def _enable_imu_logging(self, out_video_path: Path, sync_offset: Optional[float]):
+        """Enable IMU CSV logging with the given sync offset. Call AFTER setting T0."""
         if self._serial_reader is None:
             return
         csv_path = out_video_path.parent / "IMUTimeStamp.csv"
         header = "timestamp_ms, A.X, A.Y, A.Z, W.X, W.Y, W.Z"
+        reader = self._serial_reader
+        record_start_us = self.record_start_host_us
+
+        reader.set_time_sync(sync_offset, record_start_us)
         try:
-            self._sync_imu_timebase()
-        except Exception:
-            pass
-        try:
-            self._serial_reader.enable_logging(csv_path, header)
+            reader.enable_logging(csv_path, header)
             self.serial_csv_path = str(csv_path)
             self.log_message(f"Serial CSV logging enabled: {csv_path.name}")
         except Exception as e:
             self.serial_csv_path = None
             self.log_message(f"Failed to enable serial CSV logging: {e}")
+            return
 
-    def _sync_imu_timebase(self, timeout_s: float = 0.6):
+        # Start async re-sync for a fresher offset (won't reset counters)
+        try:
+            self._resync_imu_timebase()
+        except Exception:
+            pass
+
+    def _pre_sync_imu(self):
+        """Perform SYNC handshake at setup time so offset is ready for recording."""
         reader = self._serial_reader
         if reader is None:
             return
-        record_start_us = getattr(self, "record_start_host_us", None)
-        if record_start_us is None:
-            record_start_us = float(time.perf_counter() * 1_000_000.0)
-            self.record_start_host_us = record_start_us
+        self._imu_sync_send_us = float(time.perf_counter() * 1_000_000.0)
         try:
-            reader.flush_input()
+            reader.send_line("SYNC")
         except Exception:
             pass
+        self._imu_sync_deadline = time.perf_counter() + float(IMU_SYNC_TIMEOUT_S)
+        self._imu_sync_is_presync = True
+        if not hasattr(self, '_imu_sync_timer'):
+            self._imu_sync_timer = QTimer(self)
+            self._imu_sync_timer.timeout.connect(self._imu_sync_poll)
+        self._imu_sync_timer.start(IMU_SYNC_POLL_MS)
+
+    def _sync_imu_blocking(self, timeout_s: float = 0.6) -> Optional[float]:
+        """Blocking SYNC handshake. Returns sync_offset_us or None on timeout."""
+        reader = self._serial_reader
+        if reader is None:
+            return None
+        send_us = float(time.perf_counter() * 1_000_000.0)
+        try:
+            reader.send_line("SYNC")
+        except Exception:
+            return None
+        deadline = time.perf_counter() + float(timeout_s)
+        while time.perf_counter() < deadline:
+            QApplication.processEvents()
+            try:
+                lines = reader.pop_sync_lines()
+            except Exception:
+                lines = []
+            for line in lines:
+                s = (line or "").strip()
+                if not s.startswith("SYNC,"):
+                    continue
+                try:
+                    arduino_us = float(s.split(",", 1)[1].strip())
+                    recv_us = float(time.perf_counter() * 1_000_000.0)
+                except Exception:
+                    continue
+                mid_us = (send_us + recv_us) / 2.0
+                offset = mid_us - arduino_us
+                self.log_message("IMU sync: established (blocking)")
+                return offset
+            time.sleep(0.01)
+        self.log_message("IMU sync: SYNC not received; logging raw Arduino timestamps")
+        return None
+
+    def _resync_imu_timebase(self, timeout_s: float = 0.6):
+        """Async re-sync during recording. Uses update_sync_offset to avoid resetting counters."""
+        reader = self._serial_reader
+        if reader is None:
+            return
         self._imu_sync_send_us = float(time.perf_counter() * 1_000_000.0)
         try:
             reader.send_line("SYNC")
         except Exception:
             pass
         self._imu_sync_deadline = time.perf_counter() + float(timeout_s)
-        self._imu_sync_record_start_us = record_start_us
-        # Poll via QTimer instead of busy-wait
+        self._imu_sync_is_presync = False
         if not hasattr(self, '_imu_sync_timer'):
             self._imu_sync_timer = QTimer(self)
             self._imu_sync_timer.timeout.connect(self._imu_sync_poll)
@@ -1086,10 +1150,9 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         reader = self._serial_reader
         if reader is None:
             self._imu_sync_timer.stop()
-            self.log_message("IMU sync: SYNC not received; logging raw Arduino timestamps")
             return
         try:
-            lines = reader.pop_lines()
+            lines = reader.pop_sync_lines()
         except Exception:
             lines = []
         for line in lines:
@@ -1105,8 +1168,14 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             self._imu_sync_timer.stop()
             t_mid_us = (self._imu_sync_send_us + t_recv_us) / 2.0
             sync_offset_us = t_mid_us - arduino_us
+            is_presync = getattr(self, '_imu_sync_is_presync', False)
             try:
-                reader.set_time_sync(sync_offset_us, float(self._imu_sync_record_start_us))
+                if is_presync:
+                    # Pre-sync: store offset only (no record_start_host_us yet)
+                    reader.set_time_sync(sync_offset_us, None)
+                else:
+                    # Re-sync during recording: update offset without resetting counters
+                    reader.update_sync_offset(sync_offset_us)
             except Exception:
                 pass
             self.log_message("IMU sync: established")
@@ -1114,11 +1183,11 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         # Check timeout
         if time.perf_counter() >= self._imu_sync_deadline:
             self._imu_sync_timer.stop()
-            try:
-                reader.set_time_sync(None, None)
-            except Exception:
-                pass
-            self.log_message("IMU sync: SYNC not received; logging raw Arduino timestamps")
+            is_presync = getattr(self, '_imu_sync_is_presync', False)
+            if is_presync:
+                self.log_message("IMU sync: SYNC not received during setup; will retry at recording start")
+            else:
+                self.log_message("IMU sync: re-sync timed out; using existing offset")
 
     def _stop_serial_capture(self, stop_reader: bool = False):
         if self._serial_reader is not None:
@@ -1189,12 +1258,14 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self.frame_csv_path = None
 
     def _update_recording_timeline(self):
-        out_fps = float(getattr(self, "_record_out_fps", 30.0) or 30.0)
+        # Use measured (actual) FPS for duration display, not the user-requested FPS
+        actual_fps = float(getattr(self, "_record_measured_fps",
+                                   getattr(self, "_record_out_fps", 30.0)) or 30.0)
         frame_count = int(getattr(self, "_record_frame_index", 0))
         if frame_count <= 0:
             return
         self.total_frames = frame_count
-        self.fps = out_fps
+        self.fps = actual_fps
         self.current_frame = max(0, frame_count - 1)
         self._viewer.timeline_slider.setEnabled(True)
         self._viewer.timeline_slider.setMaximum(max(0, self.total_frames - 1))
@@ -1203,20 +1274,23 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._viewer.current_time_label.setText("00:00:00")
         self._viewer.total_time_label.setText(self._viewer.seconds_to_time(duration_seconds))
 
-    def _align_imu_csv_duration(self, csv_path, target_end_ms):
+    def _check_imu_frame_sync(self, csv_path, target_end_ms):
+        """Check IMU-frame timing divergence and log diagnostics (no modification).
+
+        Returns (imu_count, imu_last_ms).
+        """
         if not csv_path or target_end_ms is None:
-            return 0, None, False
+            return 0, None
         path = Path(csv_path)
         if not path.exists() or target_end_ms < 0:
-            return 0, None, False
+            return 0, None
         try:
             with open(path, "r", encoding="utf-8", newline="") as fp:
                 rows = list(csv.reader(fp))
         except Exception:
-            return 0, None, False
+            return 0, None
         if len(rows) <= 1:
-            return 0, None, False
-        header = rows[0]
+            return 0, None
         data_rows = rows[1:]
         parsed_ts = []
         for row in data_rows:
@@ -1227,32 +1301,18 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             except Exception:
                 continue
         if not parsed_ts:
-            return 0, None, False
-        first_ts = float(parsed_ts[0])
-        rel_ts = [max(0.0, t - first_ts) for t in parsed_ts]
-        src_end = float(rel_ts[-1]) if rel_ts else 0.0
-        scale = float(target_end_ms) / src_end if src_end > 0 else 1.0
-        changed = abs(scale - 1.0) > 0.001
-        aligned_ts = [max(0.0, t * scale) for t in rel_ts]
-        ts_idx = 0
-        for row in data_rows:
-            if not row:
-                continue
-            try:
-                _ = float(row[0])
-            except Exception:
-                continue
-            row[0] = str(int(round(aligned_ts[ts_idx])))
-            ts_idx += 1
-        try:
-            with open(path, "w", encoding="utf-8", newline="") as fp:
-                writer = csv.writer(fp)
-                writer.writerow(header)
-                writer.writerows(data_rows)
-        except Exception:
-            return len(parsed_ts), None, False
-        aligned_last = float(aligned_ts[-1]) if aligned_ts else None
-        return len(parsed_ts), aligned_last, changed
+            return 0, None
+        imu_end = float(parsed_ts[-1])
+        imu_start = float(parsed_ts[0])
+        delta_end = abs(float(target_end_ms) - imu_end)
+        drift_pct = (delta_end / float(target_end_ms) * 100.0) if float(target_end_ms) > 0 else 0.0
+        if drift_pct > 1.0:
+            self.log_message(
+                f"WARNING: IMU/frame timing divergence {drift_pct:.1f}% "
+                f"(frame_end={float(target_end_ms):.1f} ms, imu_end={imu_end:.1f} ms, "
+                f"imu_start={imu_start:.1f} ms, delta={delta_end:.1f} ms)"
+            )
+        return len(parsed_ts), imu_end
 
     # ------------------------------------------------------------------
     # Recording
@@ -1281,6 +1341,9 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         except Exception:
             pass
 
+        # --- Phase 1: Prepare IMU sync BEFORE setting T0 ---
+        imu_sync_offset = self._prepare_imu_sync()
+
         cap = cv2.VideoCapture(self.selected_camera_idx, cv2.CAP_DSHOW)
         if not cap.isOpened():
             QMessageBox.critical(self, "Camera Error", f"Cannot open camera {self.selected_camera_idx}")
@@ -1291,16 +1354,31 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             QMessageBox.warning(self, "Error", "Unable to read frame to start recording.")
             return
 
+        # Probe actual camera FPS by timing a few reads
+        fps_samples = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            probe_ret, _ = cap.read()
+            t1 = time.perf_counter()
+            if probe_ret:
+                fps_samples.append(t1 - t0)
+        if fps_samples:
+            avg_interval = sum(fps_samples) / len(fps_samples)
+            measured_fps = 1.0 / avg_interval if avg_interval > 0 else DEFAULT_RECORDING_FPS
+        else:
+            measured_fps = DEFAULT_RECORDING_FPS
+
         h, w = frame.shape[:2]
         session_dir = self._get_session_dir()
         session_dir.mkdir(parents=True, exist_ok=True)
         out_path = session_dir / "Recording.mp4"
 
         self._record_out_fps = float(DEFAULT_RECORDING_FPS)
-        self._record_frame_interval = 1.0 / self._record_out_fps
+        self._record_measured_fps = measured_fps
+        self._record_frame_interval = 1.0 / measured_fps
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, self._record_out_fps, (w, h))
+        writer = cv2.VideoWriter(str(out_path), fourcc, measured_fps, (w, h))
         if not writer.isOpened():
             cap.release()
             QMessageBox.warning(self, "Warning", "VideoWriter could not be opened; recording disabled.")
@@ -1311,14 +1389,19 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self.is_recording = True
         self.recording_start_time = datetime.now()
         self.recording_file_path = str(out_path)
-        self._record_start_perf = time.perf_counter()
-        self.record_start_host_us = float(self._record_start_perf * 1_000_000.0)
-        self._record_latest_frame = frame
-        self._record_next_write_t = self._record_start_perf
         self._recording_started_logged = False
 
+        # --- Phase 2: Set T0 (shared epoch for frames AND IMU) ---
+        self._record_start_perf = time.perf_counter()
+        self.record_start_host_us = float(self._record_start_perf * 1_000_000.0)
+
+        # --- Phase 3: Enable IMU logging with T0 as the reference ---
         self._start_frame_timestamp_logging(out_path)
-        self._start_serial_csv_logging(out_path)
+        self._enable_imu_logging(out_path, imu_sync_offset)
+
+        self._record_latest_frame = frame
+        self._record_latest_capture_t = self._record_start_perf
+        self._record_next_write_t = self._record_start_perf
 
         self._side.recording_panel.start_btn.setEnabled(False)
         self._side.recording_panel.stop_btn.setEnabled(True)
@@ -1332,55 +1415,67 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
         self._viewer.current_time_label.setText("00:00:00")
         self._viewer.total_time_label.setText("00:00:00")
 
+        self.log_message(f"Recording Started. Camera FPS: {measured_fps:.1f}")
+        self._recording_started_logged = True
+
         try:
             self.recording_writer.write(frame)
             self._log_recorded_frame_timestamp(0.0)
             self._update_recording_timeline()
             self._viewer.update_preview(frame)
-            self.log_message("Recording Started.")
-            self._recording_started_logged = True
             self._record_next_write_t = time.perf_counter() + self._record_frame_interval
         except Exception:
             pass
+
+        # Start background capture thread (so cap.read() doesn't block the UI)
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._capture_thread.start()
 
         if not hasattr(self, '_record_timer'):
             self._record_timer = QTimer(self)
             self._record_timer.timeout.connect(self._record_tick)
         self._record_timer.start(RECORD_TICK_MS)
 
+    def _capture_loop(self):
+        """Background thread: continuously reads frames from the camera."""
+        while self.is_recording:
+            cap = self.cap
+            if not cap or not cap.isOpened():
+                break
+            try:
+                ret, frame = cap.read()
+            except Exception:
+                break
+            capture_t = time.perf_counter()
+            if ret:
+                self._record_latest_frame = frame
+                self._record_latest_capture_t = capture_t
+
     def _record_tick(self):
         if not self.is_recording:
             return
-        if not self.cap or not self.cap.isOpened():
-            self.stop_recording()
-            return
-        ret, frame = self.cap.read()
-        if ret:
-            self._record_latest_frame = frame
+        # Update preview from latest captured frame
+        lf = getattr(self, '_record_latest_frame', None)
+        if lf is not None:
             try:
-                self._viewer.update_preview(frame)
+                self._viewer.update_preview(lf)
             except Exception:
                 pass
         now = time.perf_counter()
-        loops = 0
-        while now >= getattr(self, '_record_next_write_t', now) and loops < 5:
-            lf = getattr(self, '_record_latest_frame', None)
-            if lf is None:
-                break
-            try:
-                if self.recording_writer:
-                    self.recording_writer.write(lf)
-                    base_t = self._record_start_perf
-                    elapsed_ms = (time.perf_counter() - float(base_t)) * 1000.0 if base_t else 0.0
-                    self._log_recorded_frame_timestamp(elapsed_ms)
-                if not getattr(self, '_recording_started_logged', False):
-                    self.log_message("Recording Started.")
-                    self._recording_started_logged = True
-            except Exception:
-                break
-            self._record_next_write_t += self._record_frame_interval
-            loops += 1
-        if loops > 0:
+        if now >= getattr(self, '_record_next_write_t', now):
+            if lf is not None:
+                try:
+                    if self.recording_writer:
+                        self.recording_writer.write(lf)
+                        ct = getattr(self, '_record_latest_capture_t', now)
+                        base_t = self._record_start_perf
+                        elapsed_ms = (ct - float(base_t)) * 1000.0 if base_t else 0.0
+                        self._log_recorded_frame_timestamp(elapsed_ms)
+                except Exception:
+                    pass
+            # Advance past all missed slots without writing duplicate frames
+            while self._record_next_write_t <= now:
+                self._record_next_write_t += self._record_frame_interval
             self._update_recording_timeline()
 
     def stop_recording(self):
@@ -1402,15 +1497,10 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             pass
 
         try:
-            aligned_count, aligned_last_ms, changed = self._align_imu_csv_duration(serial_csv_path, frame_last_ms)
-            if aligned_count > 0 and aligned_last_ms is not None:
-                imu_count = aligned_count
-                imu_last_ms = aligned_last_ms
-                if changed:
-                    self.log_message(
-                        f"IMU duration aligned to frame duration: imu_end={imu_last_ms:.1f} ms, "
-                        f"frame_end={float(frame_last_ms):.1f} ms"
-                    )
+            diag_count, diag_last_ms = self._check_imu_frame_sync(serial_csv_path, frame_last_ms)
+            if diag_count > 0 and diag_last_ms is not None:
+                imu_count = diag_count
+                imu_last_ms = diag_last_ms
         except Exception:
             pass
 
@@ -1440,6 +1530,12 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
             self.cap = None
 
         self.is_recording = False
+
+        # Wait for the capture thread to finish
+        if hasattr(self, '_capture_thread') and self._capture_thread is not None:
+            self._capture_thread.join(timeout=2.0)
+            self._capture_thread = None
+
         self._side.recording_panel.start_btn.setEnabled(True)
         self._side.recording_panel.stop_btn.setEnabled(False)
         self._side.recording_panel.start_btn.setText("Start Recording")
@@ -1462,6 +1558,21 @@ class VideoWindow(QMainWindow, DebouncedGeometryMixin):
                     if src.exists():
                         shutil.move(str(src), str(raw_dir / name))
                 self.log_message(f"Recording files moved to {raw_dir.name}/")
+                # Save recording metadata
+                try:
+                    measured_fps = getattr(self, '_record_measured_fps', self._record_out_fps)
+                    metadata = {
+                        "recording_fps": measured_fps,
+                        "requested_fps": self._record_out_fps,
+                        "total_frames": int(self._record_frame_index),
+                        "duration_ms": float(self._record_last_frame_ts_ms),
+                    }
+                    metadata_path = raw_dir / "recording_metadata.json"
+                    with open(metadata_path, "w", encoding="utf-8") as f:
+                        json.dump(metadata, f, indent=2)
+                    self.log_message(f"Recording metadata saved ({measured_fps:.1f} fps measured, {self._record_out_fps} fps requested)")
+                except Exception as e:
+                    self.log_message(f"Warning: Could not save recording metadata: {e}")
         except Exception as e:
             self.log_message(f"Warning: Could not move recording files: {e}")
 
