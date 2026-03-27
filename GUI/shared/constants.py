@@ -23,7 +23,7 @@ ARDUINO_CODE_DIR = PROJECT_ROOT / "ArduinoCode" / "sensorOutput"
 # ---------------------------------------------------------------------------
 # Recording / Camera
 # ---------------------------------------------------------------------------
-DEFAULT_RECORDING_FPS = 30
+DEFAULT_RECORDING_FPS = 20
 CAMERA_PROBE_MAX = 6
 RECORD_TICK_MS = 10          # ms between recording-loop ticks
 LIVE_PREVIEW_MS = 30         # ms between live-preview refreshes

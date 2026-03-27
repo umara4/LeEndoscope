@@ -5,8 +5,7 @@ Contains the session name input and start/stop recording buttons.
 """
 from __future__ import annotations
 
-from PyQt6.QtGui import QIntValidator
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton
 
 
 class RecordingPanel(QWidget):
@@ -29,12 +28,11 @@ class RecordingPanel(QWidget):
         # Recording FPS row
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Recording FPS:"))
-        self.fps_input = QLineEdit()
-        self.fps_input.setText("30")
-        self.fps_input.setPlaceholderText("30")
-        self.fps_input.setValidator(QIntValidator(1, 120))
-        self.fps_input.setFixedWidth(60)
-        fps_row.addWidget(self.fps_input)
+        self.fps_combo = QComboBox()
+        self.fps_combo.addItems(["20", "10", "5", "2", "1"])
+        self.fps_combo.setCurrentIndex(0)  # default 20
+        self.fps_combo.setFixedWidth(60)
+        fps_row.addWidget(self.fps_combo)
         fps_row.addStretch()
         layout.addLayout(fps_row)
 
@@ -49,9 +47,8 @@ class RecordingPanel(QWidget):
         layout.addLayout(btn_layout)
 
     def get_recording_fps(self) -> int:
-        """Return user-entered FPS, defaulting to 30 if invalid."""
+        """Return selected FPS from the dropdown, defaulting to 20 if invalid."""
         try:
-            val = int(self.fps_input.text())
-            return max(1, min(120, val))
+            return int(self.fps_combo.currentText())
         except (ValueError, TypeError):
-            return 30
+            return 20

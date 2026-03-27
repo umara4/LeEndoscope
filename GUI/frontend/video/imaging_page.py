@@ -1554,7 +1554,7 @@ class ImagingPage(QWidget):
         self._side.recording_panel.start_btn.setEnabled(False)
         self._side.recording_panel.stop_btn.setEnabled(True)
         self._side.recording_panel.start_btn.setText("Recording...")
-        self._side.recording_panel.fps_input.setEnabled(False)
+        self._side.recording_panel.fps_combo.setEnabled(False)
 
         self._viewer.timeline_slider.setEnabled(True)
         self._viewer.timeline_slider.setMaximum(0)
@@ -1685,7 +1685,7 @@ class ImagingPage(QWidget):
         self._side.recording_panel.start_btn.setEnabled(True)
         self._side.recording_panel.stop_btn.setEnabled(False)
         self._side.recording_panel.start_btn.setText("Start Recording")
-        self._side.recording_panel.fps_input.setEnabled(True)
+        self._side.recording_panel.fps_combo.setEnabled(True)
 
         # Move recording files to Raw Data
         try:
