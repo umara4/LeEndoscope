@@ -77,9 +77,6 @@ class AnnotationController:
     def set_scribble_mode(self, mode: str) -> bool:
         return self._post("set_mode", {"mode": mode})
 
-    def set_scribble_depth(self, depth: float) -> bool:
-        return self._post("set_depth", {"depth": depth})
-
     def finish_stroke(self) -> bool:
         return self._post("finish")
 
