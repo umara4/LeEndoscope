@@ -77,3 +77,8 @@ NERFSTUDIO_VIEWER_PORT = 7007                  # Default ns-viewer port on remot
 NERFSTUDIO_LOCAL_PORT = 7010                   # Local port for SSH tunnel
 NERFSTUDIO_VIEWER_STARTUP_TIMEOUT_S = 120      # Max wait for viewer to start
 NERFSTUDIO_HEALTH_CHECK_INTERVAL_S = 15        # Seconds between health pings
+
+# Annotation control server (Flask daemon thread inside Viewer)
+NERFSTUDIO_ANNOTATION_PORT = 7008              # HTTP API port on remote
+NERFSTUDIO_LOCAL_ANNOTATION_PORT = 7008        # Local port for annotation tunnel
+NERFSTUDIO_ANNOTATION_TIMEOUT_S = 5            # HTTP request timeout

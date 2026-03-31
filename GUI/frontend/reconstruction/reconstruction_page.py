@@ -34,6 +34,7 @@ from shared.constants import (
     NERFSTUDIO_VIEWER_PORT,
     NERFSTUDIO_LOCAL_PORT, NERFSTUDIO_HEALTH_CHECK_INTERVAL_S,
     NERFSTUDIO_WORKING_DIR, NERFSTUDIO_CONDA_ENV,
+    NERFSTUDIO_ANNOTATION_PORT, NERFSTUDIO_LOCAL_ANNOTATION_PORT,
 )
 
 # paramiko availability is checked at connection time via the worker.
@@ -62,6 +63,9 @@ try:
 except ImportError:
     NerfstudioTrainWorker = None
 
+from backend.annotation_controller import AnnotationController
+from frontend.reconstruction.annotations_panel import AnnotationsPanel
+
 
 class ReconstructionPage(QWidget):
     """Nerfstudio reconstruction page: connect, train, and view."""
@@ -86,7 +90,13 @@ class ReconstructionPage(QWidget):
         self._conn_collapsed = True
         self._train_collapsed = True
         self._viewer_collapsed = True
+        self._annotations_collapsed = True
         self._terminal_collapsed = False  # starts expanded
+
+        # Annotation state
+        self._annotations_controller: AnnotationController | None = None
+        self._annotation_tunnel_server: socket.socket | None = None
+        self._annotation_tunnel_stop: threading.Event | None = None
 
         self._build_ui()
 
@@ -243,6 +253,28 @@ class ReconstructionPage(QWidget):
         self._viewer_content.setVisible(False)
         side_layout.addWidget(self._viewer_content)
 
+        # -- Annotations (collapsible) --
+        self._annotations_btn = QPushButton("Annotations")
+        self._annotations_btn.setFixedHeight(40)
+        self._annotations_btn.setIcon(self._make_circle_icon("#6C6C80"))
+        self._annotations_btn.setIconSize(QSize(10, 10))
+        self._annotations_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._annotations_btn.clicked.connect(self._toggle_annotations)
+        self._annotations_btn.setEnabled(False)
+        side_layout.addWidget(self._annotations_btn)
+
+        self._annotations_content = QWidget()
+        annotations_layout = QVBoxLayout(self._annotations_content)
+        annotations_layout.setContentsMargins(5, 5, 5, 5)
+        annotations_layout.setSpacing(6)
+
+        self._annotations_panel = AnnotationsPanel()
+        self._annotations_panel.set_controller(None)
+        annotations_layout.addWidget(self._annotations_panel)
+
+        self._annotations_content.setVisible(False)
+        side_layout.addWidget(self._annotations_content)
+
         # -- Terminal (collapsible, starts expanded) --
         self._terminal_btn = QPushButton("Terminal \u25bc")
         self._terminal_btn.setFixedHeight(40)
@@ -320,6 +352,13 @@ class ReconstructionPage(QWidget):
         self._viewer_content.setVisible(not self._viewer_collapsed)
         self._viewer_toggle_btn.setText(
             "Nerfstudio Viewer \u25bc" if not self._viewer_collapsed else "Nerfstudio Viewer"
+        )
+
+    def _toggle_annotations(self):
+        self._annotations_collapsed = not self._annotations_collapsed
+        self._annotations_content.setVisible(not self._annotations_collapsed)
+        self._annotations_btn.setText(
+            "Annotations \u25bc" if not self._annotations_collapsed else "Annotations"
         )
 
     def _toggle_terminal(self):
@@ -537,6 +576,7 @@ class ReconstructionPage(QWidget):
         )
         self._health_checker.health_check_failed.connect(self._on_health_failed)
         self._health_checker.start()
+        self._init_annotations()
 
     def _setup_tunnel(self):
         """SSH port forward: localhost:{LOCAL_PORT} -> remote:{VIEWER_PORT}."""
@@ -595,6 +635,101 @@ class ReconstructionPage(QWidget):
             except Exception:
                 pass
             self._forward_server = None
+
+    # ==================================================================
+    # Annotation Control
+    # ==================================================================
+
+    def _init_annotations(self):
+        """Set up annotation tunnel and controller after viewer becomes ready."""
+        if not self._ssh_client:
+            self._log("Cannot init annotations: no SSH client.")
+            return
+        try:
+            self._setup_annotation_tunnel()
+        except Exception as exc:
+            self._log(f"Failed to set up annotation tunnel: {exc}")
+            return
+
+        self._annotations_controller = AnnotationController(
+            local_port=NERFSTUDIO_LOCAL_ANNOTATION_PORT,
+            log_callback=self._log,
+        )
+        if self._annotations_controller.health_check():
+            self._annotations_panel.set_controller(self._annotations_controller)
+            self._annotations_btn.setIcon(self._make_circle_icon("#4CAF50"))
+            self._annotations_btn.setEnabled(True)
+            self._log("Annotations ready.")
+        else:
+            self._log("Annotation server not responding; annotations disabled.")
+            self._annotations_controller = None
+
+    def _cleanup_annotations(self):
+        """Tear down annotation tunnel and controller."""
+        self._annotations_controller = None
+        self._annotations_btn.setIcon(self._make_circle_icon("#6C6C80"))
+        self._annotations_btn.setEnabled(False)
+        self._annotations_panel.set_controller(None)
+        self._cleanup_annotation_tunnel()
+
+    def _setup_annotation_tunnel(self):
+        """SSH port forward: localhost:{LOCAL_ANNOTATION_PORT} -> remote:{ANNOTATION_PORT}."""
+        self._cleanup_annotation_tunnel()
+        if not self._ssh_client:
+            raise RuntimeError("SSH not connected.")
+        transport = self._ssh_client.get_transport()
+        if transport is None:
+            raise RuntimeError("SSH transport is not active.")
+
+        local_port = NERFSTUDIO_LOCAL_ANNOTATION_PORT
+        remote_port = NERFSTUDIO_ANNOTATION_PORT
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", local_port))
+        server.listen(128)
+        server.settimeout(1.0)
+        self._annotation_tunnel_server = server
+        self._annotation_tunnel_stop = threading.Event()
+        stop = self._annotation_tunnel_stop
+
+        def _forward_loop():
+            while not stop.is_set():
+                try:
+                    client_sock, addr = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    channel = transport.open_channel(
+                        "direct-tcpip",
+                        ("127.0.0.1", remote_port),
+                        addr,
+                    )
+                except Exception:
+                    client_sock.close()
+                    continue
+                threading.Thread(
+                    target=NerfstudioViewerWorker._relay,
+                    args=(client_sock, channel),
+                    daemon=True,
+                ).start()
+
+        threading.Thread(target=_forward_loop, daemon=True).start()
+        self._log(f"Annotation tunnel: localhost:{local_port} -> remote:{remote_port}")
+
+    def _cleanup_annotation_tunnel(self):
+        """Tear down the annotation SSH tunnel."""
+        if self._annotation_tunnel_stop is not None:
+            self._annotation_tunnel_stop.set()
+            self._annotation_tunnel_stop = None
+        if self._annotation_tunnel_server is not None:
+            try:
+                self._annotation_tunnel_server.close()
+            except Exception:
+                pass
+            self._annotation_tunnel_server = None
 
     # ==================================================================
     # Manual Viewer Launch / Stop
@@ -667,6 +802,7 @@ class ReconstructionPage(QWidget):
         )
         self._health_checker.health_check_failed.connect(self._on_health_failed)
         self._health_checker.start()
+        self._init_annotations()
 
     def _load_viewer(self, url: str):
         """Load the nerfstudio viewer URL into QWebEngineView."""
@@ -708,6 +844,8 @@ class ReconstructionPage(QWidget):
         self._stop_viewer()
 
     def _stop_viewer(self):
+        self._cleanup_annotations()
+
         if self._health_checker and self._health_checker.isRunning():
             self._health_checker.request_stop()
             self._health_checker.wait(2000)
