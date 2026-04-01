@@ -197,6 +197,15 @@ class ReconstructionPage(QWidget):
         train_layout.setContentsMargins(5, 5, 5, 5)
         train_layout.setSpacing(6)
 
+        train_folder_label = QLabel("Nerfstudio Data Folder:")
+        train_folder_label.setStyleSheet(STYLE_BOLD_LABEL)
+        train_layout.addWidget(train_folder_label)
+
+        self._train_folder_input = QLineEdit()
+        self._train_folder_input.setPlaceholderText("Cylinder")
+        self._train_folder_input.setText("Cylinder")
+        train_layout.addWidget(self._train_folder_input)
+
         train_row = QHBoxLayout()
 
         self._train_btn = QPushButton("Start Training")
@@ -454,14 +463,23 @@ class ReconstructionPage(QWidget):
             QMessageBox.warning(self, "Not Connected", "Connect to the server first.")
             return
 
+        train_folder = self._train_folder_input.text().strip()
+        if not train_folder:
+            QMessageBox.warning(self, "Missing Folder", "Enter a Nerfstudio folder name (for example: Cylinder or poster).")
+            return
+        if "/" in train_folder or "\\" in train_folder:
+            QMessageBox.warning(self, "Invalid Folder", "Enter only the folder name, not a full path.")
+            return
+
         set_button_enabled_style(self._train_btn, False)
         set_button_enabled_style(self._stop_train_btn, True)
         self._train_stage.setText("Initializing...")
-        self._log("Starting training...")
+        self._log(f"Starting training from data/nerfstudio/{train_folder}...")
 
         self._train_worker = NerfstudioTrainWorker(
             ssh_client=self._ssh_client,
             remote_job_path=NERFSTUDIO_WORKING_DIR,
+            train_data_subdir=train_folder,
             nerfstudio_method="nerfacto",
             viewer_port=NERFSTUDIO_VIEWER_PORT,
             conda_env=NERFSTUDIO_CONDA_ENV,

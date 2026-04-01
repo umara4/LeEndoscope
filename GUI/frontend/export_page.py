@@ -228,8 +228,8 @@ class ExportPage(QWidget):
 
                 parts.append(
                     '<div style="margin-bottom:20px; text-align:center;">'
-                    f'<img src="{img_path.name}" width="680"><br>'
                     f'<p style="color:#666; font-size:11px;">Captured: {ts_display}</p>'
+                    f'<img src="{img_path.name}" width="680"><br>'
                     f'<p style="font-style:italic;">'
                     f'{caption if caption else "(No caption)"}</p></div>'
                 )

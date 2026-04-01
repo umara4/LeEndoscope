@@ -25,6 +25,10 @@ class PatientListWidget(QFrame):
         self.new_patient_btn.setStyleSheet(SUCCESS_BUTTON_STYLE)
         layout.addWidget(self.new_patient_btn)
 
+        # Delete Patient Button
+        self.delete_patient_btn = QPushButton("Delete Selected")
+        layout.addWidget(self.delete_patient_btn)
+
         # Patient List
         self.patient_list = QListWidget()
         layout.addWidget(self.patient_list)
