@@ -82,3 +82,6 @@ class AnnotationController:
 
     def clear_strokes(self) -> bool:
         return self._post("clear_all")
+
+    def toggle_training_cameras(self, visible: bool) -> bool:
+        return self._post("toggle_cameras", {"visible": visible})

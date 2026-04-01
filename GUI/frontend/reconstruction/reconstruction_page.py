@@ -96,6 +96,9 @@ class ReconstructionPage(QWidget):
         self._annotations_collapsed = True
         self._terminal_collapsed = False  # starts expanded
 
+        # Training camera visibility
+        self._train_cams_visible = True
+
         # Annotation state
         self._annotations_controller: AnnotationController | None = None
         self._annotation_tunnel_server: socket.socket | None = None
@@ -237,6 +240,14 @@ class ReconstructionPage(QWidget):
         set_button_enabled_style(self._reload_btn, False)
         self._reload_btn.clicked.connect(self._on_reload_clicked)
         side_layout.addWidget(self._reload_btn)
+
+        # -- Toggle Training Images --
+        self._toggle_cams_btn = QPushButton("Toggle Training Images")
+        self._toggle_cams_btn.setFixedHeight(40)
+        self._toggle_cams_btn.setEnabled(False)
+        set_button_enabled_style(self._toggle_cams_btn, False)
+        self._toggle_cams_btn.clicked.connect(self._on_toggle_training_cams)
+        side_layout.addWidget(self._toggle_cams_btn)
 
         self._viewer_status = QLabel("Viewer: Not running")
         self._viewer_status.setStyleSheet(STYLE_STATUS_DISCONNECTED)
@@ -636,6 +647,7 @@ class ReconstructionPage(QWidget):
             self._annotations_panel.set_controller(self._annotations_controller)
             self._annotations_btn.setIcon(self._make_circle_icon("#4CAF50"))
             self._annotations_btn.setEnabled(True)
+            set_button_enabled_style(self._toggle_cams_btn, True)
             self._log("Annotations ready.")
         else:
             self._log("Annotation server not responding; annotations disabled.")
@@ -647,6 +659,8 @@ class ReconstructionPage(QWidget):
         self._annotations_btn.setIcon(self._make_circle_icon("#6C6C80"))
         self._annotations_btn.setEnabled(False)
         self._annotations_panel.set_controller(None)
+        set_button_enabled_style(self._toggle_cams_btn, False)
+        self._train_cams_visible = True
         self._cleanup_annotation_tunnel()
 
     def _setup_annotation_tunnel(self):
@@ -707,6 +721,25 @@ class ReconstructionPage(QWidget):
             except Exception:
                 pass
             self._annotation_tunnel_server = None
+
+    # ==================================================================
+    # Toggle Training Camera Frustums
+    # ==================================================================
+
+    def _on_toggle_training_cams(self):
+        """Toggle visibility of training camera frustums in the viewer."""
+        if not self._annotations_controller:
+            self._log("Cannot toggle cameras: no annotation controller.")
+            return
+        self._train_cams_visible = not self._train_cams_visible
+        ok = self._annotations_controller.toggle_training_cameras(self._train_cams_visible)
+        if ok:
+            state = "visible" if self._train_cams_visible else "hidden"
+            self._log(f"Training cameras: {state}")
+        else:
+            # Revert on failure
+            self._train_cams_visible = not self._train_cams_visible
+            self._log("Failed to toggle training cameras.")
 
     # ==================================================================
     # Viewer helpers
