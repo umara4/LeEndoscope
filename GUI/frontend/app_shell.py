@@ -8,10 +8,11 @@ Launched after successful login.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QStackedWidget,
+    QPushButton, QStackedWidget, QMessageBox,
 )
 
 from shared.geometry_mixin import DebouncedGeometryMixin
@@ -32,7 +33,7 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
 
     def __init__(self, user_db=None, patient_db=None):
         super().__init__()
-        self.setWindowTitle("LeEndoscope")
+        self.setWindowTitle("Margin Recon")
         self.resize(1400, 800)
 
         # Restore geometry
@@ -48,6 +49,8 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
 
         # Page-access gating flags
         self._imaging_unlocked = False
+        self._reconstruction_unlocked = False
+        self._export_unlocked = False
         self._reconstruction_loaded = False
 
         # --- Central widget ---
@@ -70,8 +73,9 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
             nav_bar.addWidget(btn, stretch=1)
             self._tab_buttons.append(btn)
 
-        # Imaging and Export tabs start locked; Reconstruction is always available
+        # Imaging, Reconstruction, and Export tabs start locked
         self._tab_buttons[1].setEnabled(False)
+        self._tab_buttons[2].setEnabled(False)
         self._tab_buttons[3].setEnabled(False)
 
         root_layout.addLayout(nav_bar)
@@ -115,10 +119,16 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
             return
         if idx == 1 and not self._imaging_unlocked:
             return
+        if idx == 2 and not self._reconstruction_unlocked:
+            return
+        if idx == 3 and not self._export_unlocked:
+            return
         if idx == 2:
             self._ensure_reconstruction_loaded()
         if idx == 3:
-            return  # Export not yet implemented
+            patient = self._patient_page.current_patient
+            export_dir = self._get_export_dir()
+            self._export_page.set_patient(patient, export_dir)
         self._switch_to(idx)
 
     def _ensure_reconstruction_loaded(self):
@@ -126,6 +136,7 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
         if not self._reconstruction_loaded:
             from frontend.reconstruction.reconstruction_page import ReconstructionPage
             self._reconstruction_page = ReconstructionPage()
+            self._reconstruction_page.navigate_to_export.connect(self._go_to_export)
             self._stack.removeWidget(self._reconstruction_placeholder)
             self._reconstruction_placeholder.deleteLater()
             self._stack.insertWidget(2, self._reconstruction_page)
@@ -159,6 +170,8 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
         self._switch_to(1)
 
     def _unlock_and_go_to_reconstruction(self, session_info: dict):
+        self._reconstruction_unlocked = True
+        self._tab_buttons[2].setEnabled(True)
         self._ensure_reconstruction_loaded()
         self._reconstruction_page.set_session_info(session_info)
         self._switch_to(2)
@@ -171,6 +184,33 @@ class AppShell(QMainWindow, DebouncedGeometryMixin):
                 btn.setStyleSheet(NAV_BAR_ACTIVE_STYLE)
             else:
                 btn.setStyleSheet(NAV_BAR_BUTTON_STYLE)
+
+    # ------------------------------------------------------------------
+    # Export directory (from session)
+    # ------------------------------------------------------------------
+    def _get_export_dir(self) -> Path | None:
+        """Get the Export dir from the imaging page's session directory."""
+        session_dir = self._imaging_page.session_dir
+        if not session_dir:
+            return None
+        export_dir = Path(session_dir) / "Export"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        return export_dir
+
+    def _go_to_export(self):
+        """Handle Export button click from reconstruction page."""
+        patient = self._patient_page.current_patient
+        if not patient:
+            QMessageBox.warning(self, "No Patient", "Select a patient first.")
+            return
+        export_dir = self._get_export_dir()
+        if not export_dir:
+            QMessageBox.warning(self, "No Session", "Start an imaging session first.")
+            return
+        self._export_unlocked = True
+        self._tab_buttons[3].setEnabled(True)
+        self._export_page.set_patient(patient, export_dir)
+        self._switch_to(3)
 
     # ------------------------------------------------------------------
     # Recording → Patient Profile relay

@@ -41,6 +41,7 @@ class PatientProfilePage(QWidget):
         # Left panel - Patient list
         self.patient_list_widget = PatientListWidget()
         self.patient_list_widget.new_patient_btn.clicked.connect(self.new_patient)
+        self.patient_list_widget.delete_patient_btn.clicked.connect(self.delete_selected_patient)
         self.patient_list_widget.patient_list.itemSelectionChanged.connect(self.on_patient_selected)
         content_layout.addWidget(self.patient_list_widget, 1)
 
@@ -109,6 +110,38 @@ class PatientProfilePage(QWidget):
                 # Media is session-only; clear DB-loaded media references
                 self.current_patient.associated_videos = []
                 self.current_patient.associated_images = []
+
+    def delete_selected_patient(self):
+        item = self.patient_list_widget.patient_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No Selection", "Select a patient to delete.")
+            return
+
+        patient_id = item.data(Qt.ItemDataRole.UserRole)
+        patient_name = item.text() or "this patient"
+
+        choice = QMessageBox.question(
+            self,
+            "Delete Patient",
+            f"Are you sure you want to delete {patient_name}?\n\nThis action cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.db.delete_patient(patient_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", f"Could not delete patient.\n{exc}")
+            return
+
+        if self.current_patient and self.current_patient.patient_id == patient_id:
+            self.current_patient = None
+
+        self.refresh_patient_list()
+        self.clear_form()
+        QMessageBox.information(self, "Deleted", f"{patient_name} was deleted.")
 
     # ------------------------------------------------------------------
     # Form load / clear

@@ -11,6 +11,7 @@ remote execution, line-by-line parsing, cooperative shutdown.
 from __future__ import annotations
 
 import re
+import shlex
 import threading
 import time
 
@@ -61,6 +62,7 @@ class NerfstudioTrainWorker(QThread):
         self,
         ssh_client,
         remote_job_path: str,
+        train_data_subdir: str = "Cylinder",
         nerfstudio_method: str = "nerfacto",
         viewer_port: int = NERFSTUDIO_VIEWER_PORT,
         conda_env: str = NERFSTUDIO_CONDA_ENV,
@@ -69,6 +71,7 @@ class NerfstudioTrainWorker(QThread):
         super().__init__()
         self._client = ssh_client
         self._job_path = remote_job_path
+        self._train_data_subdir = train_data_subdir
         self._method = nerfstudio_method
         self._viewer_port = viewer_port
         self._conda_env = conda_env
@@ -111,12 +114,14 @@ class NerfstudioTrainWorker(QThread):
     # ------------------------------------------------------------------
 
     def _run_training(self) -> bool:
+        data_path = f"data/nerfstudio/{self._train_data_subdir}"
         cmd = (
             f'bash -lc "'
-            f"cd {NERFSTUDIO_WORKING_DIR} && "
-            f"conda activate {self._conda_env} && "
-            f"ns-train {self._method} "
-            f"--data data/nerfstudio/poster "
+            f"cd {shlex.quote(self._job_path)} && "
+            f"conda activate {shlex.quote(self._conda_env)} && "
+            f"export CUDA_VISIBLE_DEVICES=6,7 && "
+            f"ns-train {shlex.quote(self._method)} "
+            f"--data {shlex.quote(data_path)} "
             f"--viewer.websocket-port {self._viewer_port}"
             f'"'
         )

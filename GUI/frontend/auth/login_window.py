@@ -20,7 +20,7 @@ class MainLoginWindow(QWidget, CenteredWidgetMixin):
     def __init__(self, db=None):
         super().__init__()
         self.db = db
-        self.setWindowTitle("LeEndoscope Login")
+        self.setWindowTitle("Margin Recon Login")
         self.restore_geometry_if_available()
         self._build_ui()
 
@@ -29,7 +29,7 @@ class MainLoginWindow(QWidget, CenteredWidgetMixin):
         super().closeEvent(event)
 
     def _build_ui(self):
-        title = QLabel("LeEndoscope")
+        title = QLabel("Margin Recon")
         title.setStyleSheet(STYLE_APP_TITLE)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
