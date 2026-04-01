@@ -117,7 +117,7 @@ class NerfstudioTrainWorker(QThread):
             f"conda activate {self._conda_env} && "
             f"export CUDA_VISIBLE_DEVICES=6,7 && "
             f"ns-train {self._method} "
-            f"--data data/nerfstudio/poster "
+            f"--data data/nerfstudio/Cylinder "
             f"--viewer.websocket-port {self._viewer_port}"
             f'"'
         )

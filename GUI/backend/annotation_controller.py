@@ -80,8 +80,5 @@ class AnnotationController:
     def finish_stroke(self) -> bool:
         return self._post("finish")
 
-    def clear_last_stroke(self) -> bool:
-        return self._post("clear_last")
-
-    def clear_all_strokes(self) -> bool:
+    def clear_strokes(self) -> bool:
         return self._post("clear_all")

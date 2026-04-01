@@ -5,7 +5,7 @@ workflow on the Nerfstudio viewer.
 Provides:
 - Enable/disable toggle
 - Mode selector (Navigate / Draw)
-- Finish / Clear Last / Clear All buttons
+- Finish / Clear buttons
 - Status label
 
 All controls route through an AnnotationController (HTTP client wrapper).
@@ -13,9 +13,10 @@ All controls route through an AnnotationController (HTTP client wrapper).
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout,
     QCheckBox, QComboBox, QPushButton, QLabel,
 )
+from PyQt6.QtCore import pyqtSignal
 
 from shared.theme import STYLE_BOLD_LABEL, ACCENT_BUTTON_STYLE, TEXT_MUTED
 from shared.form_helpers import set_button_enabled_style
@@ -26,6 +27,8 @@ from backend.annotation_controller import AnnotationController
 
 class AnnotationsPanel(QWidget):
     """Annotation controls that talk to the remote Viewer via AnnotationController."""
+
+    screenshot_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,15 +82,15 @@ class AnnotationsPanel(QWidget):
         self._finish_btn.clicked.connect(self._on_finish)
         layout.addWidget(self._finish_btn)
 
-        btn_row = QHBoxLayout()
-        self._clear_last_btn = QPushButton("Clear Last")
-        self._clear_last_btn.clicked.connect(self._on_clear_last)
-        btn_row.addWidget(self._clear_last_btn)
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(self._on_clear)
+        layout.addWidget(self._clear_btn)
 
-        self._clear_all_btn = QPushButton("Clear All")
-        self._clear_all_btn.clicked.connect(self._on_clear_all)
-        btn_row.addWidget(self._clear_all_btn)
-        layout.addLayout(btn_row)
+        # -- Screenshot button --
+        self._screenshot_btn = QPushButton("Screenshot")
+        self._screenshot_btn.setStyleSheet(ACCENT_BUTTON_STYLE)
+        self._screenshot_btn.clicked.connect(self.screenshot_requested.emit)
+        layout.addWidget(self._screenshot_btn)
 
         # -- Status label --
         self._status_label = QLabel("")
@@ -103,8 +106,8 @@ class AnnotationsPanel(QWidget):
         self._enable_cb.setEnabled(enabled)
         self._mode_combo.setEnabled(enabled)
         set_button_enabled_style(self._finish_btn, enabled)
-        set_button_enabled_style(self._clear_last_btn, enabled)
-        set_button_enabled_style(self._clear_all_btn, enabled)
+        set_button_enabled_style(self._clear_btn, enabled)
+        set_button_enabled_style(self._screenshot_btn, enabled)
         self._update_status()
 
     # ------------------------------------------------------------------
@@ -125,13 +128,9 @@ class AnnotationsPanel(QWidget):
         if self._controller:
             self._controller.finish_stroke()
 
-    def _on_clear_last(self):
+    def _on_clear(self):
         if self._controller:
-            self._controller.clear_last_stroke()
-
-    def _on_clear_all(self):
-        if self._controller:
-            self._controller.clear_all_strokes()
+            self._controller.clear_strokes()
 
     # ------------------------------------------------------------------
     # Status display

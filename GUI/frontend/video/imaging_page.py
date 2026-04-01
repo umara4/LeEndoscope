@@ -1894,7 +1894,10 @@ class ImagingPage(QWidget):
 
     def start_reconstruction(self):
         terminal_text = self._side.terminal_display.toPlainText()
-        self.navigate_to_reconstruction.emit({"terminal_log": terminal_text})
+        info = {"terminal_log": terminal_text}
+        if self.session_dir is not None:
+            info["session_dir"] = str(self.session_dir)
+        self.navigate_to_reconstruction.emit(info)
 
     def _build_session_info(self) -> dict | None:
         """Collect session paths for the reconstruction page."""
